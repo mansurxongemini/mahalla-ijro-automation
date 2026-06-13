@@ -1,118 +1,361 @@
+"""
+ERP avtomatlashtirish — mahalla.ijro.uz "Оила қўшиш" oynasi orqali o'quvchilarni
+ПИНФЛ (ЖШШИР) bo'yicha ro'yxatga olish.
+
+Sayt: Angular + PrimeNG. Shuning uchun:
+  - Element id'lari (pn_id_xxx) HAR SAFAR o'zgaradi -> ularga tayanmaymiz.
+  - Toast'lar PrimeNG severity klasslari bilan ajratiladi:
+        .p-toast-message-warn     -> SARIQ ogohlantirish
+        .p-toast-message-success  -> YASHIL muvaffaqiyat
+        .p-toast-message-error    -> QIZIL xato
+  - Boshqaruv elementlari label matni va formcontrolname bo'yicha topiladi.
+
+ALGORITM:
+  0. Modal yopiq bo'lsa: "+" bosiladi (Ҳужжат тури sukut bo'yicha "Фуқаролик пасспорти").
+  1. ЖШШИР Excel'dan olinadi -> inputga yoziladi -> "Қидириш..." bosiladi.
+  2. Qidiruv natijasi:
+       A) SARIQ toast ("...бошқа МФЙда...")  -> Excel QIZIL, keyingisiga (modal ochiq).
+       B) "Давом этиш" tugmali dialog        -> tugma bosiladi, keyingisiga (modal ochiq).
+       C) Ф.И.Ш avto-to'ldi (toast yo'q)     -> Хонадон random + Оила аъзо тури "Бошқа" -> "Сақлаш".
+            C1) YASHIL toast  -> Excel YASHIL, modal O'ZI YOPILADI -> 0-qadam.
+            C2) SARIQ toast   -> Excel SARIQ, modal ochiq, keyingi ЖШШИР ga (qayta urinmaymiz).
+
+ISHGA TUSHIRISH:
+    pip install playwright openpyxl
+    playwright install chromium
+    python test.py
+  Birinchi marta brauzer ochilganda QO'LDA login qiling va kerakli sahifani oching,
+  keyin terminalda ENTER bosing. Profil saqlanadi (.pw_profile), keyingi safar login kerak emas.
+"""
+
 import asyncio
-from playwright.async_api import async_playwright
+import random
+import re
+import sys
+
 import openpyxl
 from openpyxl.styles import PatternFill
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-# Excel uchun ranglar (HEX formatda)
-RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")     # Case A uchun qizil
-GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")   # Case C1 uchun yashil
+# ============================================================================
+#  SOZLAMALAR
+# ============================================================================
 
-EXCEL_FILE = "15_08_2025_ERP.xlsx"
-JSHSHIR_COLUMN = 5  # JSHSHIR (ПИНФЛ) joylashgan ustun indeksi (E ustuni = 5)
+EXCEL_FILE = "15.08.2025 ERP.xlsx"   # nuqta va probel bilan — haqiqiy nom
+JSHSHIR_COLUMN = 6                    # ПИНФЛ ustuni = F (6).  DIQQAT: 5 = "Пол"!
+START_ROW = 3                         # 1=sarlavha, 2=ustun nomlari, data 3-qatordan
+END_ROW = None                        # None = oxirigacha. Sinov uchun masalan 7.
+
+TARGET_URL = ("https://mahalla.ijro.uz/dashboard/list/family"
+              "?region_id=00s0eed0000region000008"
+              "&district_id=00s0eed0000region000049"
+              "&mahalla_id=66016a6ae237a52f91961c45"
+              "&returnPath=%2Fdashboard%2Fassistance&page=1&limit=20&offset=0")
+
+PROFILE_DIR = ".pw_profile"           # login shu yerda saqlanadi (qayta-qayta login kerak emas)
+HEADLESS = False
+SLOW_MO = 0                           # ms; sekinlashtirib kuzatish uchun masalan 200
+SAVE_EVERY = 1                        # har necha qatorda Excel saqlash
+
+FAMILY_TYPE_LABEL = "Бошқа"           # "Оила аъзо тури" dan tanlanadigan qiymat
+
+# Kutish vaqtlari
+SEARCH_TIMEOUT_MS = 9000              # qidiruv natijasini kutish
+SAVE_TIMEOUT_MS = 9000               # saqlash natijasini kutish
+POLL_MS = 250
+
+# ============================================================================
+#  SELEKTORLAR  (HTML'dan olingan; faqat BTN_ADD taxminiy)
+# ============================================================================
+
+DIALOG = "app-create-family-dialog"
+
+# "+" tugmasi — PrimeNG icon-only button (pi pi-plus, rounded-full)
+BTN_ADD = "button.p-button-icon-only.rounded-full:has(.pi-plus)"
+
+# ЖШШИР input — "ЖШШИР" labeldan keyingi input
+JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
+SEARCH_BTN = f"{DIALOG} button:has-text('Қидириш')"
+# Ф.И.Ш readonly input — "Ф.И.Ш" labeldan keyingi input
+FISH_INPUT = "xpath=//label[contains(normalize-space(.),'Ф.И.Ш')]/following-sibling::input[1]"
+
+HOUSE_DROPDOWN = "p-dropdown[formcontrolname='id']"        # Хонадон
+FAMILY_TYPE_DROPDOWN = "p-dropdown[formcontrolname='type']"  # Оила аъзо тури
+SAVE_BTN = "app-create-family-dialog-footer button"
+
+# Case B: "Фуқаро рўйҳатга олинган маҳаллалар" dialogi
+CASE_B_DIALOG = "app-citizen-family-info-dialog"
+CONTINUE_BTN = f"{CASE_B_DIALOG} button:has-text('Давом этиш')"
+
+# Toast'lar — PrimeNG. Holatni detal matni bo'yicha ajratamiz.
+TOAST_DETAIL = ".p-toast-detail"
+TOAST_CLOSE = ".p-toast-icon-close"
+
+# Toast detal matni (kichik harfda solishtiriladi)
+TXT_OTHER_MFY = "бошқа мфй"   # Case A: "...бошқа МФЙда доимий рўйхатдан ўтган"
+TXT_HOUSE_DUP = "хонадон"     # C2:    "Мазкур хонадон тизимга киритилган"
+
+# Excel ranglari
+RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+YELLOW_FILL = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+
+
+# ============================================================================
+#  YORDAMCHI FUNKSIYALAR
+# ============================================================================
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def already_processed(cell):
+    """Resume: qator allaqachon bo'yalgan bo'lsa o'tkazib yuboramiz."""
+    fill = cell.fill
+    if fill is None or fill.fill_type != "solid":
+        return False
+    color = (fill.start_color.rgb or "").upper()
+    return any(c in color for c in ("FFC7CE", "C6EFCE", "FFEB9C"))
+
+
+async def visible(page, selector, timeout=600):
+    try:
+        await page.locator(selector).first.wait_for(state="visible", timeout=timeout)
+        return True
+    except PWTimeout:
+        return False
+
+
+async def dismiss_toasts(page):
+    """Eski toast'larni yopamiz — stale o'qishning oldini olish uchun."""
+    try:
+        closers = page.locator(TOAST_CLOSE)
+        for i in range(await closers.count()):
+            try:
+                await closers.nth(i).click(timeout=300)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+async def open_modal(page):
+    """0-qadam: 'Оила қўшиш' modalini ochish va ЖШШИР input chiqishini kutish."""
+    await page.locator(BTN_ADD).first.click()
+    await page.locator(JSHSHIR_INPUT).first.wait_for(state="visible", timeout=8000)
+
+
+async def open_primeng_dropdown(page, selector):
+    """PrimeNG p-dropdown'ni ochib, panel ko'rinishini kutadi."""
+    await page.locator(selector).first.click()
+    await page.locator(".p-dropdown-panel").last.wait_for(state="visible", timeout=5000)
+
+
+async def pick_random_house(page):
+    """Хонадон dropdown'dan random element tanlaydi. True/False qaytaradi."""
+    await open_primeng_dropdown(page, HOUSE_DROPDOWN)
+    options = page.get_by_role("option")
+    # ro'yxat yuklanishini biroz kutamiz
+    try:
+        await options.first.wait_for(state="visible", timeout=4000)
+    except PWTimeout:
+        # bo'sh bo'lsa panelni yopamiz
+        await page.keyboard.press("Escape")
+        return False
+    count = await options.count()
+    if count == 0:
+        await page.keyboard.press("Escape")
+        return False
+    await options.nth(random.randint(0, count - 1)).click()
+    return True
+
+
+async def pick_family_type(page, label):
+    """Оила аъзо тури dropdown'dan berilgan label'ni tanlaydi."""
+    await open_primeng_dropdown(page, FAMILY_TYPE_DROPDOWN)
+    opt = page.get_by_role("option", name=label, exact=True)
+    if await opt.count() == 0:
+        opt = page.get_by_role("option", name=label)  # contains fallback
+    await opt.first.click()
+
+
+async def toast_detail(page):
+    """Ko'rinib turgan toast'ning detal matnini (kichik harfda) qaytaradi, bo'lmasa None."""
+    loc = page.locator(TOAST_DETAIL)
+    try:
+        n = await loc.count()
+        if n == 0:
+            return None
+        el = loc.last
+        if await el.is_visible():
+            return (await el.inner_text()).strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+async def wait_search_result(page):
+    """
+    Qidiruv natijasini aniqlaydi:
+      'warn'   -> Case A (sariq, "бошқа МФЙ")
+      'dialog' -> Case B ("Давом этиш" dialogi)
+      'filled' -> Case C (Ф.И.Ш to'ldi)
+      'none'   -> hech narsa (timeout)
+    """
+    elapsed = 0
+    while elapsed < SEARCH_TIMEOUT_MS:
+        # Case B: dialog
+        if await page.locator(CASE_B_DIALOG).first.is_visible():
+            return "dialog"
+        # Case A: sariq toast (detal matni bo'yicha)
+        detail = await toast_detail(page)
+        if detail and TXT_OTHER_MFY in detail:
+            return "warn"
+        # Case C: Ф.И.Ш to'ldimi?
+        try:
+            val = await page.locator(FISH_INPUT).first.input_value(timeout=300)
+            if val and val.strip():
+                return "filled"
+        except Exception:
+            pass
+        await page.wait_for_timeout(POLL_MS)
+        elapsed += POLL_MS
+    return "none"
+
+
+async def wait_save_result(page):
+    """
+    Saqlash natijasini aniqlaydi:
+      'success' -> C1: modal O'ZI YOPILADI (eng ishonchli signal)
+      'warn'    -> C2: "...хонадон тизимга киритилган" sariq toast, modal ochiq
+      'none'    -> timeout
+    """
+    elapsed = 0
+    while elapsed < SAVE_TIMEOUT_MS:
+        # C2: xonadon dublikat (modal ochiq qoladi)
+        detail = await toast_detail(page)
+        if detail and TXT_HOUSE_DUP in detail:
+            return "warn"
+        # C1: modal yopilgan bo'lsa -> muvaffaqiyat
+        if not await page.locator(DIALOG).first.is_visible():
+            return "success"
+        await page.wait_for_timeout(POLL_MS)
+        elapsed += POLL_MS
+    return "none"
+
+
+# ============================================================================
+#  ASOSIY OQIM
+# ============================================================================
 
 async def main():
-    # Excel faylni yuklash (faqat RAMga o'qiladi)
     wb = openpyxl.load_workbook(EXCEL_FILE)
     sheet = wb.active
+    last_row = END_ROW or sheet.max_row
+
+    stats = {"A": 0, "B": 0, "C1": 0, "C2": 0, "skip": 0, "err": 0}
 
     async with async_playwright() as p:
-        # Tezlikni kuzatish uchun headless=False (orqa fonda ishlatish uchun True qiling)
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
+        context = await p.chromium.launch_persistent_context(
+            PROFILE_DIR, headless=HEADLESS, slow_mo=SLOW_MO
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(TARGET_URL)
 
-        # Tizimga kirish va avtorizatsiya URL
-        await page.goto("TIZIM_URL_MANZILI_SHU_YERGA")
-        
-        # TODO: Bu yerda login/parol kiritish mantig'ini yozishingiz mumkin (agar kerak bo'lsa)
-        # await page.fill("input#login", "username")
-        # await page.click("button#submit")
-        
-        modal_open = False  # Modal oyna holatini kuzatish
+        await asyncio.to_thread(
+            input, ">>> Login qiling va kerakli sahifani oching, keyin ENTER bosing... "
+        )
 
-        for row in range(2, sheet.max_row + 1):
-            jshshir_value = sheet.cell(row=row, column=JSHSHIR_COLUMN).value
-            if not jshshir_value:
+        modal_open = False
+
+        for row in range(START_ROW, last_row + 1):
+            cell = sheet.cell(row=row, column=JSHSHIR_COLUMN)
+            raw = cell.value
+            if not raw:
                 continue
-            
-            jshshir = str(jshshir_value).strip()
-            print(f"Ishorlanmoqda: Qator {row} -> JSHSHIR: {jshshir}")
-
-            # 1-QADAM: Agar modal yopiq bo'lsa (Boshlanish yoki C1 dan keyin)
-            if not modal_open:
-                await page.click("SELECTOR_PLUS_TUGMASI")
-                await page.click("SELECTOR_FUQAROLIK_PASSPORTI_BO`LIMI")
-                # JSHSHIR va Tug'ilgan sana opsiyasini tanlash mantig'i
-                await page.click("SELECTOR_JSHSHIR_OPTION")
-                modal_open = True
-
-            # 2-QADAM: JSHSHIR kiritish va Qidirish
-            await page.fill("SELECTOR_JSHSHIR_INPUT", jshshir)
-            await page.click("SELECTOR_QIDIRISH_TUGMASI")
-
-            # Server javobini va UI o'zgarishini qisqa kutish (Tezlikni oshirish uchun kichik timeout)
-            await page.wait_for_timeout(1500) 
-
-            # QIDIRUV NATIJASI TAHLILI (Qaror nuqtasi)
-            
-            # Case A: Sariq ogohlantirish (Boshqa MFY)
-            yellow_toast = page.locator("SELECTOR_SARIQ_TOAST_NOTIFICATION")
-            if await yellow_toast.is_visible() and "бошқа МФЙда" in await yellow_toast.inner_text():
-                print(f"-> Case A: Boshqa MFY. Excel QIZIL rangga bo'yaldi.")
-                sheet.cell(row=row, column=JSHSHIR_COLUMN).fill = RED_FILL
-                # Inputni tozalab keyingisiga o'tamiz, oyna ochiq qoladi
-                await page.fill("SELECTOR_JSHSHIR_INPUT", "")
+            if already_processed(cell):
+                stats["skip"] += 1
                 continue
 
-            # Case B: Dialog oynasi (Fuqaro mahallalarda)
-            dialog_box = page.locator("SELECTOR_DIALOG_OYNASI")
-            if await dialog_box.is_visible():
-                print(f"-> Case B: Dialog chiqdi. 'Davom etish' bosildi.")
-                await page.click("SELECTOR_DAVOM_ETISH_KO`K_TUGMASI")
-                # Inputni tozalab keyingisiga o'tamiz, oyna ochiq qoladi
-                await page.fill("SELECTOR_JSHSHIR_INPUT", "")
+            jshshir = str(raw).strip()
+            if not jshshir.isdigit() or len(jshshir) != 14:
+                log(f"[{row}] NOTO'G'RI ЖШШИР: {jshshir!r} — o'tkazildi")
+                stats["err"] += 1
                 continue
 
-            # Case C: Ma'lumotlar avto-to'ldi (F.I.Sh inputi bo'sh emasligini tekshirish)
-            fish_input = page.locator("SELECTOR_FISH_INPUT")
-            if await fish_input.get_attribute("value"):
-                print(f"-> Case C: Ma'lumotlar topildi. Xonadon to'ldirilmoqda...")
-                
-                # Xonadon dropdown qismini ochish
-                await page.click("SELECTOR_XONADON_DROPDOWN")
-                await page.wait_for_timeout(500)
-                
-                # Random yoki birinchi xonadonni tanlash (Dropdown elementlari ro'yxatidan)
-                await page.click("SELECTOR_XONADON_BIRINCHI_ELEMENT")
-                
-                # Oila bo'limidan 'Boshqa'ni tanlash
-                await page.select_option("SELECTOR_OILA_BOLIMI_SELECT", value="Boshqa") # yoki tegishli selector
-                
-                # SAQLASH
-                await page.click("SELECTOR_SAQLASH_TUGMASI")
-                await page.wait_for_timeout(1500)
+            log(f"[{row}] ЖШШИР: {jshshir}")
+            try:
+                if not modal_open:
+                    await open_modal(page)
+                    modal_open = True
 
-                # SAQLASH NATIJASI TAHLILI
-                success_toast = page.locator("SELECTOR_YASHIL_SUCCESS_TOAST")
-                
-                # C1: Muvaffaqiyatli saqlandi
-                if await success_toast.is_visible() and "муваффақиятли" in await success_toast.inner_text():
-                    print(f"-> Case C1: Muvaffaqiyatli saqlandi. Excel YASHIL rangga bo'yaldi.")
-                    sheet.cell(row=row, column=JSHSHIR_COLUMN).fill = GREEN_FILL
-                    modal_open = False  # Tizim modalni o'zi yopdi, holat 0 dan boshlanadi
-                    continue
-                
-                # C2: Xonadon allaqachon mavjud (Sariq ogohlantirish)
-                if await yellow_toast.is_visible() and "тизимга киритилган" in await yellow_toast.inner_text():
-                    print(f"-> Case C2: Xonadon allaqachon tizimda bor. Oyna ochiq holda o'tildi.")
-                    # Oyna yopilmagan, faqat keyingi JSHSHIRga o'tiladi
-                    await page.fill("SELECTOR_JSHSHIR_INPUT", "")
-                    continue
+                await dismiss_toasts(page)
+                await page.locator(JSHSHIR_INPUT).first.fill("")
+                await page.locator(JSHSHIR_INPUT).first.fill(jshshir)
+                await page.locator(SEARCH_BTN).first.click()
 
-        # Barcha sikllar tugagach, Excel faylni yozish (Batch Update)
+                result = await wait_search_result(page)
+
+                if result == "warn":
+                    log("  -> Case A: boshqa MFY. Excel QIZIL.")
+                    cell.fill = RED_FILL
+                    stats["A"] += 1
+
+                elif result == "dialog":
+                    log("  -> Case B: 'Давом этиш' bosildi.")
+                    await page.locator(CONTINUE_BTN).first.click()
+                    await page.wait_for_timeout(500)
+                    stats["B"] += 1
+
+                elif result == "filled":
+                    log("  -> Case C: ma'lumot topildi. Xonadon + Оила аъзо тури to'ldirilmoqda.")
+                    if not await pick_random_house(page):
+                        log("     !! Xonadon ro'yxati bo'sh — o'tkazildi.")
+                        stats["err"] += 1
+                        continue
+                    await pick_family_type(page, FAMILY_TYPE_LABEL)
+                    await dismiss_toasts(page)
+                    await page.locator(SAVE_BTN).first.click()
+
+                    save_res = await wait_save_result(page)
+                    if save_res == "success":
+                        log("  -> C1: MUVAFFAQIYATLI. Excel YASHIL. Modal yopildi.")
+                        cell.fill = GREEN_FILL
+                        modal_open = False
+                        stats["C1"] += 1
+                    elif save_res == "warn":
+                        log("  -> C2: xonadon allaqachon tizimda. Excel SARIQ.")
+                        cell.fill = YELLOW_FILL
+                        stats["C2"] += 1
+                    else:
+                        log(f"  -> ?: saqlash natijasi noma'lum ({save_res}).")
+                        stats["err"] += 1
+
+                else:
+                    log(f"  -> ?: qidiruv natijasi aniqlanmadi ({result}).")
+                    stats["err"] += 1
+
+            except Exception as e:
+                log(f"  !! XATO [{row}]: {e}")
+                stats["err"] += 1
+                modal_open = False  # xavfsizlik uchun modalni qayta ochamiz
+
+            if (row - START_ROW + 1) % SAVE_EVERY == 0:
+                wb.save(EXCEL_FILE)
+
         wb.save(EXCEL_FILE)
-        print("!!! JARAYON YAKUNLANDI. Excel fayl saqlandi !!!")
-        await browser.close()
+        log("\n==== YAKUNLANDI ====")
+        log(f"A  (qizil / boshqa MFY)      : {stats['A']}")
+        log(f"B  (dialog / davom etish)    : {stats['B']}")
+        log(f"C1 (yashil / muvaffaqiyatli) : {stats['C1']}")
+        log(f"C2 (sariq / xonadon dublikat): {stats['C2']}")
+        log(f"O'tkazib yuborilgan          : {stats['skip']}")
+        log(f"Xato / noma'lum              : {stats['err']}")
+        await context.close()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit("\nFoydalanuvchi to'xtatdi.")
