@@ -70,9 +70,8 @@ POLL_MS = 250
 
 DIALOG = "app-create-family-dialog"
 
-# "+" / "Оила қўшиш" tugmasi — ro'yxat sahifasida. HTML berilmagani uchun TAXMINIY.
-# Agar ishlamasa, to'g'ri selektorni qo'ying (masalan: 'button:has-text("Оила қўшиш")').
-BTN_ADD = ":is(button:has-text('Оила қўшиш'), button:has(.pi-plus), p-button:has(.pi-plus) button)"
+# "+" tugmasi — PrimeNG icon-only button (pi pi-plus, rounded-full)
+BTN_ADD = "button.p-button-icon-only.rounded-full:has(.pi-plus)"
 
 # ЖШШИР input — "ЖШШИР" labeldan keyingi input
 JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
