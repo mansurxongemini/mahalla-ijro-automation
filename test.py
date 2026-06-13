@@ -140,7 +140,10 @@ def already_processed(cell):
     fill = cell.fill
     if fill is None or fill.fill_type != "solid":
         return False
-    color = (fill.start_color.rgb or "").upper()
+    try:
+        color = str(fill.start_color.rgb).upper()
+    except Exception:
+        return False
     return any(c in color for c in ("FFC7CE", "C6EFCE", "FFEB9C"))
 
 
