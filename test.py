@@ -9,9 +9,11 @@ Sayt: Angular + PrimeNG.
     QAYTADAN OCHILADI.
 
 BU VERSIYADA:
-  - Modal ochilganda "Ҳужжат тури = Фуқаролик пасспорти" ANIQ tanlanadi.
-  - BATAFSIL QADAM LOGI: STEP_LOG=True bo'lsa, har bir mayda amal vaqt belgisi bilan
-    loglanadi (". [HH:MM:SS.mmm] ..."). Shu loglardan ketma-ketlikni tahlil qilamiz.
+  - Modal ochilganda "Ҳужжат тури" dan ЖШШИР-li opsiya ("ЖШШИР ва туғилган сана") tanlanadi.
+  - Case C readonly natija inputlari (Ф.И.Ш / Туғилган сана) qiymati bo'yicha aniqlanadi.
+  - Natija ALOHIDA faylga yoziladi ("..._natija.xlsx") -> manba fayl Excelda ochiq qolsa
+    ham PermissionError bo'lmaydi.
+  - BATAFSIL QADAM LOGI (step) va debug screenshot mavjud.
 
 ISHGA TUSHIRISH:
     pip install playwright openpyxl
@@ -21,6 +23,7 @@ ISHGA TUSHIRISH:
 
 import asyncio
 import datetime
+import os
 import random
 import sys
 
@@ -32,7 +35,11 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 #  SOZLAMALAR
 # ============================================================================
 
-EXCEL_FILE = "15.08.2025 ERP.xlsx"
+EXCEL_FILE = "15.08.2025 ERP.xlsx"   # MANBA fayl (o'qish uchun; ochiq qolsa ham bo'ladi)
+# Natija (rangli) alohida faylga yoziladi -> manba fayl Excelda ochiq bo'lsa ham xato bermaydi.
+# Avtomatik nom: "<manba>_natija.xlsx". Xohlasangiz o'zingiz belgilang.
+_base, _ext = os.path.splitext(EXCEL_FILE)
+OUTPUT_FILE = f"{_base}_natija{_ext}"
 JSHSHIR_COLUMN = 6
 START_ROW = 3
 END_ROW = None               # None = oxirigacha. Sinov uchun masalan 10.
@@ -42,7 +49,9 @@ DEBUG_SCREENSHOTS = True
 STEP_LOG = True              # batafsil qadam-baqadam log
 
 SELECT_DOC_TYPE = True
-DOC_TYPE_VALUE = "Фуқаролик пасспорти"   # Ҳужжат тури qiymati
+# Ҳужжат тури dropdown'dan TANLANADIGAN opsiyada shu so'z bo'lishi kerak.
+# "ЖШШИР ва туғилган сана" opsiyasini tanlash uchun "ЖШШИР" yetarli.
+DOC_TYPE_MATCH = "ЖШШИР"
 
 TARGET_URL = ("https://mahalla.ijro.uz/dashboard/list/family"
               "?region_id=00s0eed0000region000008"
@@ -75,6 +84,8 @@ DOC_TYPE_DROPDOWN = "xpath=//label[contains(normalize-space(.),'Ҳужжат т�
 JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
 SEARCH_BTN = f"{DIALOG} button:has-text('Қидириш')"
 FISH_INPUT = "xpath=//label[contains(normalize-space(.),'Ф.И.Ш')]/following-sibling::input[1]"
+# Natija inputlari (Ф.И.Ш, Туғилган санаси) — readonly. To'lganda Case C demakdir.
+READONLY_INPUTS = f"{DIALOG} input[readonly]"
 
 HOUSE_DROPDOWN = "p-dropdown[formcontrolname='id']"
 FAMILY_TYPE_DROPDOWN = "p-dropdown[formcontrolname='type']"
@@ -110,6 +121,19 @@ def step(msg):
 # ============================================================================
 #  YORDAMCHI FUNKSIYALAR
 # ============================================================================
+
+def safe_save(wb):
+    """Natijani OUTPUT_FILE'ga saqlaydi. Fayl band bo'lsa (Excelda ochiq) qulamaydi."""
+    try:
+        wb.save(OUTPUT_FILE)
+        return True
+    except PermissionError:
+        log(f"   !! '{OUTPUT_FILE}' band (Excelda ochiqmi?) — keyinroq qayta urinaman.")
+        return False
+    except Exception as e:
+        log(f"   !! Saqlash xatosi: {e}")
+        return False
+
 
 def already_processed(cell):
     fill = cell.fill
@@ -167,18 +191,43 @@ async def select_from_dropdown(page, dropdown_selector, label, what):
     step(f"{what}: tanlandi")
 
 
+async def select_document_type(page):
+    """Ҳужжат тури dropdown'dan DOC_TYPE_MATCH so'zli opsiyani tanlaydi.
+    Topilmasa, mavjud opsiyalarni logga chiqaradi (debug uchun)."""
+    step("Ҳужжат тури: dropdown ochilmoqda")
+    await page.locator(DOC_TYPE_DROPDOWN).first.click()
+    await page.locator(".p-dropdown-panel").last.wait_for(state="visible", timeout=5000)
+    all_opts = page.locator(".p-dropdown-panel [role='option']")
+    n = await all_opts.count()
+    texts = []
+    for i in range(n):
+        try:
+            texts.append((await all_opts.nth(i).inner_text()).strip())
+        except Exception:
+            texts.append("?")
+    step(f"Ҳужжат тури opsiyalari: {texts}")
+    target = page.locator(".p-dropdown-panel [role='option']", has_text=DOC_TYPE_MATCH)
+    if await target.count() == 0:
+        await page.keyboard.press("Escape")
+        raise RuntimeError(f"'{DOC_TYPE_MATCH}' so'zli opsiya topilmadi. Mavjud: {texts}")
+    chosen = (await target.first.inner_text()).strip()
+    step(f"Ҳужжат тури: '{chosen}' tanlanmoqda")
+    await target.first.click()
+    step("Ҳужжат тури: tanlandi")
+
+
 async def open_modal(page):
     step("'+' (Оила қўшиш) tugmasi bosilmoqda")
     await page.locator(BTN_ADD).first.click()
-    step("modal ochilishini kutyapman (ЖШШИР input ko'rinishi)")
-    await page.locator(JSHSHIR_INPUT).first.wait_for(state="visible", timeout=10000)
+    step("modal ochilishini kutyapman")
+    await page.locator(DIALOG).first.wait_for(state="visible", timeout=10000)
     await page.wait_for_timeout(300)
     step("modal ochildi")
     if SELECT_DOC_TYPE:
-        try:
-            await select_from_dropdown(page, DOC_TYPE_DROPDOWN, DOC_TYPE_VALUE, "Ҳужжат тури")
-        except Exception as e:
-            step(f"Ҳужжат тури tanlanmadi (ehtimol allaqachon tanlangan): {e}")
+        await select_document_type(page)
+    # Hujjat turi tanlangach ЖШШИР input chiqishini kutamiz
+    step("ЖШШИР input ko'rinishini kutyapman")
+    await page.locator(JSHSHIR_INPUT).first.wait_for(state="visible", timeout=8000)
 
 
 async def close_all_dialogs(page):
@@ -224,6 +273,22 @@ async def pick_random_house(page):
     return True
 
 
+async def readonly_values(page):
+    """Modaldagi readonly inputlar (Ф.И.Ш, Туғилган санаси) qiymatlarini qaytaradi."""
+    vals = []
+    try:
+        ro = page.locator(READONLY_INPUTS)
+        for i in range(await ro.count()):
+            try:
+                v = await ro.nth(i).evaluate("el => el.value")
+            except Exception:
+                v = None
+            vals.append((v or "").strip())
+    except Exception:
+        pass
+    return vals
+
+
 async def wait_search_result(page):
     step("qidiruv natijasi kutilmoqda...")
     elapsed = 0
@@ -232,13 +297,11 @@ async def wait_search_result(page):
             return "dialog"
         if await is_visible(page, WARN_TOAST):
             return "warn"
-        try:
-            val = await page.locator(FISH_INPUT).first.input_value(timeout=300)
-            if val and val.strip():
-                step(f"Ф.И.Ш to'ldi: {val.strip()!r}")
-                return "filled"
-        except Exception:
-            pass
+        # Case C: readonly natija inputlaridan birortasi to'lgan bo'lsa
+        vals = await readonly_values(page)
+        if any(vals):
+            step(f"natija to'ldi (readonly): {vals}")
+            return "filled"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
     return "none"
@@ -262,7 +325,9 @@ async def wait_save_result(page):
 # ============================================================================
 
 async def main():
-    wb = openpyxl.load_workbook(EXCEL_FILE)
+    load_path = OUTPUT_FILE if os.path.exists(OUTPUT_FILE) else EXCEL_FILE
+    log(f"Yuklanmoqda: {load_path}  ->  natija: {OUTPUT_FILE}")
+    wb = openpyxl.load_workbook(load_path)
     sheet = wb.active
     last_row = END_ROW or sheet.max_row
 
@@ -335,7 +400,7 @@ async def main():
                         stats["err"] += 1
                         await close_all_dialogs(page)
                         if (row - START_ROW + 1) % SAVE_EVERY == 0:
-                            wb.save(EXCEL_FILE)
+                            safe_save(wb)
                         continue
                     await select_from_dropdown(page, FAMILY_TYPE_DROPDOWN,
                                                FAMILY_TYPE_LABEL, "Оила аъзо тури")
@@ -364,7 +429,8 @@ async def main():
 
                 else:  # none
                     detail = await toast_detail_text(page)
-                    log(f"  -> ?: qidiruv natijasi aniqlanmadi. Toast={detail!r}")
+                    vals = await readonly_values(page)
+                    log(f"  -> ?: qidiruv natijasi aniqlanmadi. Toast={detail!r} | readonly={vals}")
                     if DEBUG_SCREENSHOTS:
                         await page.screenshot(path=f"debug_row_{row}_search.png")
                     stats["err"] += 1
@@ -381,10 +447,17 @@ async def main():
                 await close_all_dialogs(page)
 
             if (row - START_ROW + 1) % SAVE_EVERY == 0:
-                wb.save(EXCEL_FILE)
+                safe_save(wb)
 
-        wb.save(EXCEL_FILE)
-        log("\n==== YAKUNLANDI ====")
+        # Yakuniy saqlash — band bo'lsa foydalanuvchidan faylni yopishni so'raymiz
+        while not safe_save(wb):
+            ans = await asyncio.to_thread(
+                input, f">>> '{OUTPUT_FILE}' band. Faylni yopib ENTER bosing (yoki q+ENTER chiqish): "
+            )
+            if ans.strip().lower() == "q":
+                break
+        log(f"\nNatija saqlandi: {OUTPUT_FILE}")
+        log("==== YAKUNLANDI ====")
         log(f"A  (qizil / boshqa MFY)      : {stats['A']}")
         log(f"B  (dialog / davom etish)    : {stats['B']}")
         log(f"C1 (yashil / muvaffaqiyatli) : {stats['C1']}")
