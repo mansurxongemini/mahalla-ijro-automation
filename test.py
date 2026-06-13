@@ -83,13 +83,17 @@ HOUSE_DROPDOWN = "p-dropdown[formcontrolname='id']"        # Хонадон
 FAMILY_TYPE_DROPDOWN = "p-dropdown[formcontrolname='type']"  # Оила аъзо тури
 SAVE_BTN = "app-create-family-dialog-footer button"
 
-CONTINUE_BTN = "button:has-text('Давом')"   # Case B "Давом этиш"
+# Case B: "Фуқаро рўйҳатга олинган маҳаллалар" dialogi
+CASE_B_DIALOG = "app-citizen-family-info-dialog"
+CONTINUE_BTN = f"{CASE_B_DIALOG} button:has-text('Давом этиш')"
 
-TOAST_WARN = ".p-toast-message-warn"
-TOAST_SUCCESS = ".p-toast-message-success"
-TOAST_ERROR = ".p-toast-message-error"
-TOAST_ANY = ".p-toast-message"
+# Toast'lar — PrimeNG. Holatni detal matni bo'yicha ajratamiz.
+TOAST_DETAIL = ".p-toast-detail"
 TOAST_CLOSE = ".p-toast-icon-close"
+
+# Toast detal matni (kichik harfda solishtiriladi)
+TXT_OTHER_MFY = "бошқа мфй"   # Case A: "...бошқа МФЙда доимий рўйхатдан ўтган"
+TXT_HOUSE_DUP = "хонадон"     # C2:    "Мазкур хонадон тизимга киритилган"
 
 # Excel ranglari
 RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
@@ -175,24 +179,39 @@ async def pick_family_type(page, label):
     await opt.first.click()
 
 
+async def toast_detail(page):
+    """Ko'rinib turgan toast'ning detal matnini (kichik harfda) qaytaradi, bo'lmasa None."""
+    loc = page.locator(TOAST_DETAIL)
+    try:
+        n = await loc.count()
+        if n == 0:
+            return None
+        el = loc.last
+        if await el.is_visible():
+            return (await el.inner_text()).strip().lower()
+    except Exception:
+        pass
+    return None
+
+
 async def wait_search_result(page):
     """
     Qidiruv natijasini aniqlaydi:
-      'warn'   -> Case A (sariq, boshqa MFY)
-      'dialog' -> Case B (Давом этиш)
+      'warn'   -> Case A (sariq, "бошқа МФЙ")
+      'dialog' -> Case B ("Давом этиш" dialogi)
       'filled' -> Case C (Ф.И.Ш to'ldi)
-      'error'  -> qizil xato
       'none'   -> hech narsa (timeout)
     """
-    deadline = SEARCH_TIMEOUT_MS
     elapsed = 0
-    while elapsed < deadline:
-        if await page.locator(CONTINUE_BTN).first.is_visible():
+    while elapsed < SEARCH_TIMEOUT_MS:
+        # Case B: dialog
+        if await page.locator(CASE_B_DIALOG).first.is_visible():
             return "dialog"
-        if await page.locator(TOAST_WARN).first.is_visible():
+        # Case A: sariq toast (detal matni bo'yicha)
+        detail = await toast_detail(page)
+        if detail and TXT_OTHER_MFY in detail:
             return "warn"
-        if await page.locator(TOAST_ERROR).first.is_visible():
-            return "error"
+        # Case C: Ф.И.Ш to'ldimi?
         try:
             val = await page.locator(FISH_INPUT).first.input_value(timeout=300)
             if val and val.strip():
@@ -207,21 +226,17 @@ async def wait_search_result(page):
 async def wait_save_result(page):
     """
     Saqlash natijasini aniqlaydi:
-      'success' -> C1 (yashil)
-      'warn'    -> C2 (sariq)
-      'error'   -> qizil xato
+      'success' -> C1: modal O'ZI YOPILADI (eng ishonchli signal)
+      'warn'    -> C2: "...хонадон тизимга киритилган" sariq toast, modal ochiq
       'none'    -> timeout
     """
-    deadline = SAVE_TIMEOUT_MS
     elapsed = 0
-    while elapsed < deadline:
-        if await page.locator(TOAST_SUCCESS).first.is_visible():
-            return "success"
-        if await page.locator(TOAST_WARN).first.is_visible():
+    while elapsed < SAVE_TIMEOUT_MS:
+        # C2: xonadon dublikat (modal ochiq qoladi)
+        detail = await toast_detail(page)
+        if detail and TXT_HOUSE_DUP in detail:
             return "warn"
-        if await page.locator(TOAST_ERROR).first.is_visible():
-            return "error"
-        # success belgisi sifatida modal yopilishini ham tekshiramiz
+        # C1: modal yopilgan bo'lsa -> muvaffaqiyat
         if not await page.locator(DIALOG).first.is_visible():
             return "success"
         await page.wait_for_timeout(POLL_MS)
