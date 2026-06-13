@@ -546,4 +546,11 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        sys.exit("\nFoydalanuvchi to'xtatdi.")
+        print("\nFoydalanuvchi to'xtatdi.")
+    except Exception as e:
+        print(f"\n!!! KUTILMAGAN XATO: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("\n")
+        input(">>> Tugatish uchun ENTER bosing... ")
