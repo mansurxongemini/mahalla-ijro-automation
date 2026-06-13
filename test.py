@@ -6,30 +6,21 @@ Sayt: Angular + PrimeNG.
   - Element id'lari (pn_id_xxx) HAR SAFAR o'zgaradi -> ularga tayanmaymiz.
   - Ogohlantirish (sariq) toast'i <exclamationtriangleicon> ikonkasi bilan keladi.
   - HOLAT IZOLYATSIYASI: har bir o'quvchidan keyin modal YOPILIB, keyingisi uchun
-    QAYTADAN OCHILADI. Shu sabab har bir qidiruv toza holatdan boshlanadi.
-    (Avval modalni ochiq qoldirish Case B dan keyin "none" xatosini keltirib chiqargan.)
+    QAYTADAN OCHILADI.
 
-ALGORITM:
-  Har bir ЖШШИР uchun:
-    0. Modal ochiladi ("+"; Ҳужжат тури sukut bo'yicha "Фуқаролик пасспорти").
-    1. ЖШШИР kiritiladi -> "Қидириш..." bosiladi.
-    2. Natija:
-       A) SARIQ ogohlantirish toast  -> Excel QIZIL.
-       B) "Давом этиш" dialogi        -> tugma bosiladi (o'tkaziladi).
-       C) Ф.И.Ш to'ldi (toast yo'q)   -> Хонадон random + Оила аъзо тури "Бошқа" -> "Сақлаш":
-            C1) modal O'ZI YOPILADI   -> Excel YASHIL (muvaffaqiyat).
-            C2) SARIQ toast (хонадон) -> Excel SARIQ (dublikat).
-    3. Modal ochiq qolgan bo'lsa yopiladi (keyingisi toza boshlanishi uchun).
+BU VERSIYADA:
+  - Modal ochilganda "Ҳужжат тури = Фуқаролик пасспорти" ANIQ tanlanadi.
+  - BATAFSIL QADAM LOGI: STEP_LOG=True bo'lsa, har bir mayda amal vaqt belgisi bilan
+    loglanadi (". [HH:MM:SS.mmm] ..."). Shu loglardan ketma-ketlikni tahlil qilamiz.
 
 ISHGA TUSHIRISH:
     pip install playwright openpyxl
     playwright install chromium
     python test.py
-  Birinchi marta brauzer ochilganda QO'LDA login qiling va kerakli sahifani oching,
-  keyin terminalda ENTER bosing. Profil saqlanadi (.pw_profile).
 """
 
 import asyncio
+import datetime
 import random
 import sys
 
@@ -42,12 +33,16 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 # ============================================================================
 
 EXCEL_FILE = "15.08.2025 ERP.xlsx"
-JSHSHIR_COLUMN = 6           # ПИНФЛ ustuni = F (6).  DIQQAT: 5 = "Пол"!
-START_ROW = 3                # data 3-qatordan
+JSHSHIR_COLUMN = 6
+START_ROW = 3
 END_ROW = None               # None = oxirigacha. Sinov uchun masalan 10.
 
-SKIP_PROCESSED = True        # allaqachon bo'yalgan qatorlarni o'tkazib yuborish (resume)
-DEBUG_SCREENSHOTS = True     # noaniq holatda screenshot saqlash (debug_row_N.png)
+SKIP_PROCESSED = True
+DEBUG_SCREENSHOTS = True
+STEP_LOG = True              # batafsil qadam-baqadam log
+
+SELECT_DOC_TYPE = True
+DOC_TYPE_VALUE = "Фуқаролик пасспорти"   # Ҳужжат тури qiymati
 
 TARGET_URL = ("https://mahalla.ijro.uz/dashboard/list/family"
               "?region_id=00s0eed0000region000008"
@@ -71,11 +66,12 @@ POLL_MS = 250
 # ============================================================================
 
 DIALOG = "app-create-family-dialog"
-DIALOG_WRAP = "div.p-dialog:has(app-create-family-dialog)"          # asosiy modal konteyneri
-DIALOG_CLOSE = f"{DIALOG_WRAP} button[aria-label='Close']"          # X tugma
+DIALOG_WRAP = "div.p-dialog:has(app-create-family-dialog)"
+ANY_DIALOG_CLOSE = "div.p-dialog button[aria-label='Close']"
 
 BTN_ADD = "button.p-button-icon-only.rounded-full:has(.pi-plus)"
 
+DOC_TYPE_DROPDOWN = "xpath=//label[contains(normalize-space(.),'Ҳужжат тури')]/following-sibling::p-dropdown[1]"
 JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
 SEARCH_BTN = f"{DIALOG} button:has-text('Қидириш')"
 FISH_INPUT = "xpath=//label[contains(normalize-space(.),'Ф.И.Ш')]/following-sibling::input[1]"
@@ -87,25 +83,33 @@ SAVE_BTN = "app-create-family-dialog-footer button"
 CASE_B_DIALOG = "app-citizen-family-info-dialog"
 CONTINUE_BTN = f"{CASE_B_DIALOG} button:has-text('Давом этиш')"
 
-# Ogohlantirish (sariq) toast — exclamationtriangle ikonkasi yoki warn klass bo'yicha
 WARN_TOAST = ".p-toast-message-warn, p-toast .p-toast-message:has(exclamationtriangleicon)"
-ANY_DIALOG_CLOSE = "div.p-dialog button[aria-label='Close']"
 TOAST_DETAIL = ".p-toast-detail"
 TOAST_CLOSE = ".p-toast-icon-close"
 
-# Excel ranglari
 RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
 
 
 # ============================================================================
-#  YORDAMCHI FUNKSIYALAR
+#  LOG
 # ============================================================================
 
 def log(msg):
     print(msg, flush=True)
 
+
+def step(msg):
+    """Batafsil qadam logi (vaqt belgisi bilan)."""
+    if STEP_LOG:
+        t = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"   . [{t}] {msg}", flush=True)
+
+
+# ============================================================================
+#  YORDAMCHI FUNKSIYALAR
+# ============================================================================
 
 def already_processed(cell):
     fill = cell.fill
@@ -123,10 +127,12 @@ async def is_visible(page, selector):
 
 
 async def dismiss_toasts(page):
-    """Mavjud toast'larni yopamiz — stale o'qishning oldini olish uchun."""
     try:
         closers = page.locator(TOAST_CLOSE)
-        for i in range(await closers.count()):
+        cnt = await closers.count()
+        if cnt:
+            step(f"{cnt} ta eski toast yopilmoqda")
+        for i in range(cnt):
             try:
                 await closers.nth(i).click(timeout=300)
             except Exception:
@@ -148,15 +154,35 @@ async def toast_detail_text(page):
     return None
 
 
+async def select_from_dropdown(page, dropdown_selector, label, what):
+    """PrimeNG p-dropdown'ni ochib, matn bo'yicha variant tanlaydi."""
+    step(f"{what}: dropdown ochilmoqda")
+    await page.locator(dropdown_selector).first.click()
+    await page.locator(".p-dropdown-panel").last.wait_for(state="visible", timeout=5000)
+    opt = page.get_by_role("option", name=label, exact=True)
+    if await opt.count() == 0:
+        opt = page.get_by_role("option", name=label)
+    step(f"{what}: '{label}' tanlanmoqda")
+    await opt.first.click()
+    step(f"{what}: tanlandi")
+
+
 async def open_modal(page):
-    """'Оила қўшиш' modalini ochib, ЖШШИР input chiqishini kutadi."""
+    step("'+' (Оила қўшиш) tugmasi bosilmoqda")
     await page.locator(BTN_ADD).first.click()
+    step("modal ochilishini kutyapman (ЖШШИР input ko'rinishi)")
     await page.locator(JSHSHIR_INPUT).first.wait_for(state="visible", timeout=10000)
-    await page.wait_for_timeout(300)  # forma settle bo'lishi uchun
+    await page.wait_for_timeout(300)
+    step("modal ochildi")
+    if SELECT_DOC_TYPE:
+        try:
+            await select_from_dropdown(page, DOC_TYPE_DROPDOWN, DOC_TYPE_VALUE, "Ҳужжат тури")
+        except Exception as e:
+            step(f"Ҳужжат тури tanlanmadi (ehtimol allaqachon tanlangan): {e}")
 
 
 async def close_all_dialogs(page):
-    """Ochiq barcha p-dialog'larni X orqali yopadi (Case B + asosiy modal)."""
+    step("ochiq dialoglar yopilmoqda")
     for _ in range(4):
         btns = page.locator(ANY_DIALOG_CLOSE)
         try:
@@ -175,42 +201,31 @@ async def close_all_dialogs(page):
         await page.wait_for_timeout(250)
 
 
-async def open_primeng_dropdown(page, selector):
-    await page.locator(selector).first.click()
-    await page.locator(".p-dropdown-panel").last.wait_for(state="visible", timeout=5000)
-
-
 async def pick_random_house(page):
-    await open_primeng_dropdown(page, HOUSE_DROPDOWN)
+    step("Хонадон: dropdown ochilmoqda")
+    await page.locator(HOUSE_DROPDOWN).first.click()
+    await page.locator(".p-dropdown-panel").last.wait_for(state="visible", timeout=5000)
     options = page.get_by_role("option")
     try:
         await options.first.wait_for(state="visible", timeout=4000)
     except PWTimeout:
+        step("Хонадон: ro'yxat bo'sh")
         await page.keyboard.press("Escape")
         return False
     count = await options.count()
     if count == 0:
+        step("Хонадон: 0 ta variant")
         await page.keyboard.press("Escape")
         return False
-    await options.nth(random.randint(0, count - 1)).click()
+    idx = random.randint(0, count - 1)
+    step(f"Хонадон: {count} ta variant, #{idx} tanlanmoqda")
+    await options.nth(idx).click()
+    step("Хонадон: tanlandi")
     return True
 
 
-async def pick_family_type(page, label):
-    await open_primeng_dropdown(page, FAMILY_TYPE_DROPDOWN)
-    opt = page.get_by_role("option", name=label, exact=True)
-    if await opt.count() == 0:
-        opt = page.get_by_role("option", name=label)
-    await opt.first.click()
-
-
 async def wait_search_result(page):
-    """
-    'warn'   -> Case A (sariq ogohlantirish)
-    'dialog' -> Case B
-    'filled' -> Case C (Ф.И.Ш to'ldi)
-    'none'   -> hech narsa
-    """
+    step("qidiruv natijasi kutilmoqda...")
     elapsed = 0
     while elapsed < SEARCH_TIMEOUT_MS:
         if await is_visible(page, CASE_B_DIALOG):
@@ -220,6 +235,7 @@ async def wait_search_result(page):
         try:
             val = await page.locator(FISH_INPUT).first.input_value(timeout=300)
             if val and val.strip():
+                step(f"Ф.И.Ш to'ldi: {val.strip()!r}")
                 return "filled"
         except Exception:
             pass
@@ -229,11 +245,7 @@ async def wait_search_result(page):
 
 
 async def wait_save_result(page):
-    """
-    'success' -> C1: modal O'ZI YOPILADI
-    'warn'    -> C2: sariq toast (хонадон дубликат), modal ochiq
-    'none'    -> timeout
-    """
+    step("saqlash natijasi kutilmoqda...")
     elapsed = 0
     while elapsed < SAVE_TIMEOUT_MS:
         if await is_visible(page, WARN_TOAST):
@@ -282,17 +294,21 @@ async def main():
                 stats["err"] += 1
                 continue
 
-            log(f"[{row}] ЖШШИР: {jshshir}")
+            log(f"[{row}] ЖШШИР: {jshshir}  ----------------------------------")
             try:
-                # Har doim toza holatdan: eski toast/dialoglarni tozalab, modalni ochamiz
+                step("toza holatga keltirish: toast/dialoglar tozalanmoqda")
                 await dismiss_toasts(page)
                 await close_all_dialogs(page)
+
                 await open_modal(page)
 
+                step(f"ЖШШИР kiritilmoqda: {jshshir}")
                 await page.locator(JSHSHIR_INPUT).first.fill(jshshir)
+                step("Қидириш tugmasi bosilmoqda")
                 await page.locator(SEARCH_BTN).first.click()
 
                 result = await wait_search_result(page)
+                step(f"qidiruv natijasi = {result}")
 
                 if result == "warn":
                     detail = await toast_detail_text(page)
@@ -302,17 +318,18 @@ async def main():
                     await close_all_dialogs(page)
 
                 elif result == "dialog":
-                    log("  -> Case B: 'Давом этиш' bosildi, o'tkazildi.")
+                    log("  -> Case B: boshqa mahallada ro'yxatda. 'Давом этиш' bosilmoqda.")
                     try:
                         await page.locator(CONTINUE_BTN).first.click(timeout=3000)
-                    except Exception:
-                        pass
+                        step("'Давом этиш' bosildi")
+                    except Exception as e:
+                        step(f"'Давом этиш' bosilmadi: {e}")
                     await page.wait_for_timeout(500)
                     stats["B"] += 1
                     await close_all_dialogs(page)
 
                 elif result == "filled":
-                    log("  -> Case C: ma'lumot topildi. Xonadon + Оила аъзо тури to'ldirilmoqda.")
+                    log("  -> Case C: ma'lumot topildi.")
                     if not await pick_random_house(page):
                         log("     !! Xonadon ro'yxati bo'sh — o'tkazildi.")
                         stats["err"] += 1
@@ -320,11 +337,14 @@ async def main():
                         if (row - START_ROW + 1) % SAVE_EVERY == 0:
                             wb.save(EXCEL_FILE)
                         continue
-                    await pick_family_type(page, FAMILY_TYPE_LABEL)
+                    await select_from_dropdown(page, FAMILY_TYPE_DROPDOWN,
+                                               FAMILY_TYPE_LABEL, "Оила аъзо тури")
                     await dismiss_toasts(page)
+                    step("Сақлаш tugmasi bosilmoqda")
                     await page.locator(SAVE_BTN).first.click()
 
                     save_res = await wait_save_result(page)
+                    step(f"saqlash natijasi = {save_res}")
                     if save_res == "success":
                         log("  -> C1: MUVAFFAQIYATLI. Excel YASHIL.")
                         cell.fill = GREEN_FILL
@@ -336,7 +356,7 @@ async def main():
                         stats["C2"] += 1
                         await close_all_dialogs(page)
                     else:
-                        log(f"  -> ?: saqlash natijasi noma'lum.")
+                        log("  -> ?: saqlash natijasi noma'lum.")
                         stats["err"] += 1
                         if DEBUG_SCREENSHOTS:
                             await page.screenshot(path=f"debug_row_{row}_save.png")
