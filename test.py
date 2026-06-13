@@ -66,8 +66,9 @@ SAVE_EVERY = 1
 
 FAMILY_TYPE_LABEL = "Бошқа"
 
-SEARCH_TIMEOUT_MS = 9000
+SEARCH_TIMEOUT_MS = 9000     # ogohlantirish/dialog kutishning MAKS vaqti (shundan keyin Case C)
 SAVE_TIMEOUT_MS = 9000
+CASE_C_CONFIRM_MS = 1000     # readonly to'lgach, warning kechikmaganini tasdiqlash oynasi
 POLL_MS = 250
 
 # ============================================================================
@@ -290,21 +291,35 @@ async def readonly_values(page):
 
 
 async def wait_search_result(page):
-    step("qidiruv natijasi kutilmoqda...")
+    """
+    Qidiruv natijasi MANTIG'I:
+      - Dialog chiqsa            -> 'dialog' (Case B)
+      - Ogohlantirish toast chiqsa -> 'warn'   (Case A)
+      - Ikkalasi HAM chiqmasa    -> 'filled' (Case C) — natija topilgani KAFOLATLANADI.
+    Ya'ni "none" yo'q: ogohlantirish/dialog bo'lmasa, saqlash bosqichiga o'tamiz.
+    Tezlashtirish uchun: readonly natija inputi to'lsa, qisqa tasdiqdan keyin darrov 'filled'.
+    """
+    step("qidiruv natijasi kutilmoqda (ogohlantirish/dialog tekshirilmoqda)...")
     elapsed = 0
+    data_seen_at = None
     while elapsed < SEARCH_TIMEOUT_MS:
         if await is_visible(page, CASE_B_DIALOG):
             return "dialog"
         if await is_visible(page, WARN_TOAST):
             return "warn"
-        # Case C: readonly natija inputlaridan birortasi to'lgan bo'lsa
+        # Ma'lumot to'ldimi? (tezkor yo'l) — lekin warning kechikishi mumkin, qisqa tasdiqlaymiz
         vals = await readonly_values(page)
         if any(vals):
-            step(f"natija to'ldi (readonly): {vals}")
-            return "filled"
+            if data_seen_at is None:
+                data_seen_at = elapsed
+                step(f"natija to'ldi (readonly): {vals} — tasdiqlanmoqda")
+            elif elapsed - data_seen_at >= CASE_C_CONFIRM_MS:
+                return "filled"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-    return "none"
+    # Belgilangan vaqt o'tdi, ogohlantirish/dialog chiqmadi -> Case C (natija bor)
+    step("ogohlantirish/dialog chiqmadi -> Case C deb qabul qilinadi")
+    return "filled"
 
 
 async def wait_save_result(page):
