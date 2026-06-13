@@ -4,31 +4,27 @@
 ============================================================================
 O'quvchilarni ПИНФЛ (ЖШШИР) bo'yicha avtomatik ro'yxatga olish.
 
-ISHGA TUSHIRISH (bir marta):
-    pip install playwright openpyxl
-    playwright install chromium
+SOZLAMALAR: config.json faylida (Bloknotda ochib o'zgartiring).
+Agar config.json yo'q bo'lsa — birinchi ishga tushirishda o'zi yaratiladi.
 
-ISHLATISH:
-    python test.py
-    -> Brauzer ochiladi. QO'LDA login qilib, kerakli sahifani oching, ENTER bosing.
-       (Login .pw_profile papkasida saqlanadi — keyingi safar login shart emas.)
+ISHGA TUSHIRISH:
+    python test.py (yoki MahallaBot.exe)
 
 QANDAY ISHLAYDI (har bir ЖШШИР uchun):
     1. "+" bosilib modal ochiladi, "Ҳужжат тури = ЖШШИР ва туғилган сана" tanlanadi.
     2. ЖШШИР kiritilib "Қидириш" bosiladi, SERVER JAVOBI kutiladi (tez).
     3. Natija:
-        - Dialog chiqsa            -> "Давом этиш" bosilib o'tkaziladi (Case B).
-        - Ogohlantirish chiqsa     -> Excel QIZIL, o'tkaziladi (Case A).
-        - Hech narsa chiqmasa      -> natija topilgan (Case C): Хонадон random +
-                                       Оила аъзо тури "Бошқа" + Сақлаш:
-              * muvaffaqiyat (modal yopiladi) -> Excel YASHIL (C1)
-              * "хонадон ... киритилган" sariq -> Excel SARIQ (C2)
-
-Hamma o'zgartiriladigan sozlamalar PASTDA, "SOZLAMALAR" bo'limida.
+        A) Ogohlantirish chiqsa     -> Excel QIZIL, keyingisiga.
+        B) Dialog chiqsa            -> "Давом этиш" bosiladi, keyingisiga.
+        C) Hech narsa chiqmasa      -> natija topilgan: Хонадон random +
+           Оила аъзо тури "Бошқа" + Сақлаш:
+              C1) modal yopiladi    -> Excel YASHIL (muvaffaqiyat)
+              C2) sariq toast       -> Excel SARIQ (dublikat)
 """
 
 import asyncio
 import datetime
+import json
 import os
 import random
 import sys
@@ -38,60 +34,92 @@ from openpyxl.styles import PatternFill
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 # ============================================================================
-#  SOZLAMALAR  (asosan SHU YERNI o'zgartirasiz)
+#  CONFIG.JSON DAN O'QISH
 # ============================================================================
 
-# --- Excel fayl ---
-EXCEL_FILE = "1.xlsx"          # MANBA Excel fayl nomi (o'qish uchun).
-                               #   Har xil fayl ishlatsangiz shu nomni o'zgartiring.
-JSHSHIR_COLUMN = 6             # ЖШШИР (ПИНФЛ) qaysi ustunda. A=1, B=2 ... F=6.
-START_ROW = 3                  # Ma'lumot nechanchi qatordan boshlanadi.
-END_ROW = None                 # Qaysi qatorgacha. None = oxirigacha. Sinov: masalan 15.
-# Natija (ranglar) ALOHIDA faylga yoziladi -> manba faylni Excelda ochiq qoldirsangiz ham
-# xato bo'lmaydi. Nomi avtomatik: "<manba>_natija.xlsx".
+CONFIG_FILE = "config.json"
+
+DEFAULTS = {
+    "EXCEL_FILE": "1.xlsx",
+    "JSHSHIR_COLUMN": 6,
+    "START_ROW": 3,
+    "END_ROW": None,
+    "conJsh": True,
+    "CACHE_FILE": "jshshir_cache.txt",
+    "SKIP_PROCESSED": True,
+    "TARGET_URL": "https://mahalla.ijro.uz/dashboard/list/family?region_id=00s0eed0000region000008&district_id=00s0eed0000region000049&mahalla_id=66016a6ae237a52f91961c45&returnPath=%2Fdashboard%2Fassistance&page=1&limit=20&offset=0",
+    "HEADLESS": False,
+    "SLOW_MO": 0,
+    "SELECT_DOC_TYPE": True,
+    "DOC_TYPE_MATCH": "ЖШШИР",
+    "FAMILY_TYPE_LABEL": "Бошқа",
+    "SERVER_WAIT_MS": 12000,
+    "SETTLE_MS": 300,
+    "UI_CHECK_MS": 1500,
+    "SAVE_EVERY": 1,
+    "POLL_MS": 200,
+    "SEARCH_API_HINT": "",
+    "STEP_LOG": True,
+    "DEBUG_SCREENSHOTS": True,
+}
+
+
+def load_config():
+    """config.json dan sozlamalarni o'qiydi. Yo'q bo'lsa DEFAULT + fayl yaratiladi."""
+    cfg = dict(DEFAULTS)
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                user = json.load(f)
+            for k, v in user.items():
+                if k.startswith("_"):
+                    continue
+                if k in cfg:
+                    cfg[k] = v
+        except Exception as e:
+            print(f"!! config.json o'qilmadi: {e}. Default sozlamalar ishlatiladi.")
+    else:
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                out = {
+                    "_IZOH_": "Bu faylni Bloknotda ochib sozlamalarni o'zgartirishingiz mumkin.",
+                    "_IZOH2_": "O'zgartirgandan keyin saqlang va dasturni qayta ishga tushiring.",
+                }
+                out.update(DEFAULTS)
+                json.dump(out, f, ensure_ascii=False, indent=4)
+            print(f"config.json yaratildi. Sozlamalarni o'zgartirish uchun uni Bloknotda oching.")
+        except Exception:
+            pass
+    return cfg
+
+
+CFG = load_config()
+
+EXCEL_FILE = CFG["EXCEL_FILE"]
+JSHSHIR_COLUMN = CFG["JSHSHIR_COLUMN"]
+START_ROW = CFG["START_ROW"]
+END_ROW = CFG["END_ROW"]
+conJsh = CFG["conJsh"]
+CACHE_FILE = CFG["CACHE_FILE"]
+SKIP_PROCESSED = CFG["SKIP_PROCESSED"]
+TARGET_URL = CFG["TARGET_URL"]
+HEADLESS = CFG["HEADLESS"]
+SLOW_MO = CFG["SLOW_MO"]
+SELECT_DOC_TYPE = CFG["SELECT_DOC_TYPE"]
+DOC_TYPE_MATCH = CFG["DOC_TYPE_MATCH"]
+FAMILY_TYPE_LABEL = CFG["FAMILY_TYPE_LABEL"]
+SERVER_WAIT_MS = CFG["SERVER_WAIT_MS"]
+SETTLE_MS = CFG["SETTLE_MS"]
+UI_CHECK_MS = CFG["UI_CHECK_MS"]
+SAVE_EVERY = CFG["SAVE_EVERY"]
+POLL_MS = CFG["POLL_MS"]
+SEARCH_API_HINT = CFG["SEARCH_API_HINT"]
+STEP_LOG = CFG["STEP_LOG"]
+DEBUG_SCREENSHOTS = CFG["DEBUG_SCREENSHOTS"]
+
+PROFILE_DIR = ".pw_profile"
 _base, _ext = os.path.splitext(EXCEL_FILE)
 OUTPUT_FILE = f"{_base}_natija{_ext}"
-
-# --- Lokal ЖШШИР keshi (takrorlanishni o'tkazib yuborish) ---
-conJsh = True                  # True  -> avval kiritilgan ЖШШИРlarni (cache faylidan) o'tkazib yuboradi.
-                               # False -> keshga qaramay, hammasini boshidan tekshiradi.
-CACHE_FILE = "jshshir_cache.txt"   # Kiritilgan ЖШШИРlar shu faylga yozib boriladi.
-
-# --- Excel rangi bo'yicha resume (shu fayl ichida) ---
-SKIP_PROCESSED = True          # True -> natija faylida allaqachon bo'yalgan qatorlarni o'tkazadi.
-
-# --- Sayt ---
-TARGET_URL = ("https://mahalla.ijro.uz/dashboard/list/family"
-              "?region_id=00s0eed0000region000008"
-              "&district_id=00s0eed0000region000049"
-              "&mahalla_id=66016a6ae237a52f91961c45"
-              "&returnPath=%2Fdashboard%2Fassistance&page=1&limit=20&offset=0")
-
-PROFILE_DIR = ".pw_profile"    # Brauzer profili (login shu yerda saqlanadi).
-HEADLESS = False               # True -> brauzer ko'rinmaydi (tezroq, lekin kuzata olmaysiz).
-SLOW_MO = 0                    # Har amaldan keyin ms kechikish (kuzatish uchun masalan 100).
-
-# --- Forma qiymatlari ---
-SELECT_DOC_TYPE = True         # Ҳужжат тури dropdown'ini tanlash kerakmi.
-DOC_TYPE_MATCH = "ЖШШИР"       # Ҳужжат тури dropdown'da SHU so'zli opsiya tanlanadi
-                               #   (masalan "ЖШШИР ва туғилган санаси").
-FAMILY_TYPE_LABEL = "Бошқа"    # "Оила аъзо тури" dan tanlanadigan qiymat.
-
-# --- Tezlik / kutish (ms) ---
-# Qidirish/saqlashda dastur SERVER JAVOBINI (XHR) kutadi — bu natija tayyor bo'lgan lahza.
-SERVER_WAIT_MS = 12000         # Server javobini kutishning MAKS vaqti.
-SETTLE_MS = 300                # Javobdan keyin UI chizilishi uchun qisqa pauza.
-UI_CHECK_MS = 1500             # Javobdan so'ng ogohlantirish/dialog chiqishini kuzatish oynasi.
-                               #   (shundan keyin "hech narsa yo'q" -> Case C deb hisoblaydi)
-SAVE_EVERY = 1                 # Har necha qatorda natija faylini saqlash.
-POLL_MS = 200                  # UI tekshiruv qadami.
-# Agar qidirish API manzilini bilsangiz (debug logda ko'rinadi), aniqlik uchun shu yerga
-# uning bir qismini yozing (masalan "/citizen" yoki "/search"). Bo'sh bo'lsa har qanday XHR kutiladi.
-SEARCH_API_HINT = ""
-
-# --- Log / debug ---
-STEP_LOG = True                # Har bir mayda amalni vaqt belgisi bilan loglash.
-DEBUG_SCREENSHOTS = True       # Noaniq holatda debug_row_N.png saqlash.
 
 # ============================================================================
 #  SELEKTORLAR  (sayt o'zgarmasa, tegmasangiz ham bo'ladi)
@@ -104,7 +132,7 @@ BTN_ADD = "button.p-button-icon-only.rounded-full:has(.pi-plus)"
 DOC_TYPE_DROPDOWN = "xpath=//label[contains(normalize-space(.),'Ҳужжат тури')]/following-sibling::p-dropdown[1]"
 JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
 SEARCH_BTN = f"{DIALOG} button:has-text('Қидириш')"
-READONLY_INPUTS = f"{DIALOG} input[readonly]"   # Ф.И.Ш / Туғилган сана (to'lsa Case C)
+READONLY_INPUTS = f"{DIALOG} input[readonly]"
 
 HOUSE_DROPDOWN = "p-dropdown[formcontrolname='id']"
 FAMILY_TYPE_DROPDOWN = "p-dropdown[formcontrolname='type']"
@@ -170,7 +198,7 @@ def safe_save(wb):
         wb.save(OUTPUT_FILE)
         return True
     except PermissionError:
-        log(f"   !! '{OUTPUT_FILE}' band (Excelda ochiqmi?) — keyinroq qayta urinaman.")
+        log(f"   !! '{OUTPUT_FILE}' band (Excelda ochiqmi?)")
         return False
     except Exception as e:
         log(f"   !! Saqlash xatosi: {e}")
@@ -240,7 +268,7 @@ async def readonly_values(page):
 
 
 def _resp_pred(resp):
-    """Qaysi network javobini 'natija' deb hisoblaymiz."""
+    """Server javobini aniqlash."""
     try:
         if SEARCH_API_HINT:
             return SEARCH_API_HINT in resp.url
@@ -250,15 +278,15 @@ def _resp_pred(resp):
 
 
 async def click_and_wait_server(page, click_selector, what):
-    """Tugmani bosadi va server javobini (XHR) kutadi — natija tayyor bo'lguncha."""
+    """Tugmani bosib server javobini (XHR) kutadi — natija tayyor bo'lguncha."""
     step(f"{what} bosilmoqda + server javobi kutilmoqda")
     try:
         async with page.expect_response(_resp_pred, timeout=SERVER_WAIT_MS) as ri:
             await page.locator(click_selector).first.click()
         resp = await ri.value
-        step(f"server javobi: {resp.status}  {resp.url}")
+        step(f"server javobi: {resp.status} {resp.url[:80]}")
     except PWTimeout:
-        step(f"{what}: server javobi kutilmadi (timeout) — UI bo'yicha davom etamiz")
+        step(f"{what}: server javobi kutilmadi (timeout)")
     await page.wait_for_timeout(SETTLE_MS)
 
 
@@ -277,7 +305,7 @@ async def select_document_type(page):
     target = page.locator(".p-dropdown-panel [role='option']", has_text=DOC_TYPE_MATCH)
     if await target.count() == 0:
         await page.keyboard.press("Escape")
-        raise RuntimeError(f"'{DOC_TYPE_MATCH}' so'zli opsiya topilmadi. Mavjud: {texts}")
+        raise RuntimeError(f"'{DOC_TYPE_MATCH}' topilmadi. Mavjud: {texts}")
     chosen = (await target.first.inner_text()).strip()
     step(f"Ҳужжат тури: '{chosen}' tanlanmoqda")
     await target.first.click()
@@ -285,7 +313,7 @@ async def select_document_type(page):
 
 
 async def open_modal(page):
-    step("'+' (Оила қўшиш) tugmasi bosilmoqda")
+    step("'+' tugmasi bosilmoqda")
     await page.locator(BTN_ADD).first.click()
     await page.locator(DIALOG).first.wait_for(state="visible", timeout=10000)
     step("modal ochildi")
@@ -346,7 +374,7 @@ async def pick_family_type(page):
 
 
 async def classify_search(page):
-    """Server javobidan keyin: 'dialog' / 'warn' / 'filled' (Case C)."""
+    """Server javobidan keyin: dialog / warn / filled (Case C)."""
     elapsed = 0
     while elapsed < UI_CHECK_MS:
         if await is_visible(page, CASE_B_DIALOG):
@@ -357,12 +385,12 @@ async def classify_search(page):
             return "filled"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-    # Ogohlantirish ham, dialog ham chiqmadi -> natija topilgan (Case C)
+    # Ogohlantirish/dialog chiqmadi -> Case C
     return "filled"
 
 
 async def classify_save(page):
-    """Saqlash javobidan keyin: 'warn' (C2) / 'success' (C1)."""
+    """Saqlash javobidan keyin: warn (C2) / success (C1)."""
     elapsed = 0
     while elapsed < UI_CHECK_MS:
         if await is_visible(page, WARN_TOAST):
@@ -413,7 +441,6 @@ async def main():
                 stats["err"] += 1
                 continue
 
-            # O'tkazib yuborish: lokal kesh (conJsh) yoki Excel rangi
             if conJsh and jshshir in cache_set:
                 stats["skip"] += 1
                 continue
@@ -444,7 +471,7 @@ async def main():
                     await close_all_dialogs(page)
 
                 elif result == "dialog":
-                    log("  -> Case B: 'Давом этиш' bosilmoqda, o'tkaziladi.")
+                    log("  -> Case B: 'Давом этиш' bosilmoqda.")
                     try:
                         await page.locator(CONTINUE_BTN).first.click(timeout=3000)
                     except Exception:
@@ -454,13 +481,11 @@ async def main():
                     await close_all_dialogs(page)
 
                 else:  # filled -> Case C
-                    log("  -> Case C: natija topildi. Хонадон + Оила аъзо тури + Сақлаш.")
+                    log("  -> Case C: Хонадон + Оила аъзо тури + Сақлаш")
                     if not await pick_random_house(page):
-                        log("     !! Xonadon ro'yxati bo'sh — o'tkazildi.")
+                        log("     !! Xonadon ro'yxati bo'sh")
                         stats["err"] += 1
                         await close_all_dialogs(page)
-                        if (row - START_ROW + 1) % SAVE_EVERY == 0:
-                            safe_save(wb)
                         continue
                     await pick_family_type(page)
                     await dismiss_toasts(page)
@@ -492,7 +517,6 @@ async def main():
                         pass
                 await close_all_dialogs(page)
 
-            # Lokalga yozib qo'yamiz (xato bo'lmasa) — keyingi safar o'tkaziladi
             if outcome and outcome != "ERR":
                 cache_set.add(jshshir)
                 cache_add(jshshir, outcome)
@@ -500,15 +524,14 @@ async def main():
             if (row - START_ROW + 1) % SAVE_EVERY == 0:
                 safe_save(wb)
 
-        # Yakuniy saqlash (band bo'lsa foydalanuvchidan so'raymiz)
         while not safe_save(wb):
             ans = await asyncio.to_thread(
-                input, f">>> '{OUTPUT_FILE}' band. Faylni yopib ENTER bosing (yoki q+ENTER): "
+                input, f">>> '{OUTPUT_FILE}' band. Faylni yopib ENTER bosing (yoki q): "
             )
             if ans.strip().lower() == "q":
                 break
 
-        log(f"\nNatija saqlandi: {OUTPUT_FILE}")
+        log(f"\nNatija: {OUTPUT_FILE}")
         log("==== YAKUNLANDI ====")
         log(f"A  (qizil / boshqa MFY)      : {stats['A']}")
         log(f"B  (dialog / davom etish)    : {stats['B']}")
