@@ -28,5 +28,5 @@
     "SEARCH_API_HINT": "",
 
     "STEP_LOG": true,
-    "DEBUG_SCREENSHOTS": true
+    "DEBUG_SCREENSHOTS": false
 }

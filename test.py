@@ -61,7 +61,7 @@ DEFAULTS = {
     "POLL_MS": 200,
     "SEARCH_API_HINT": "",
     "STEP_LOG": True,
-    "DEBUG_SCREENSHOTS": True,
+    "DEBUG_SCREENSHOTS": False,
 }
 
 
@@ -132,8 +132,12 @@ SEARCH_BTN = ("xpath=//label[contains(normalize-space(.),'ЖШШИР')]"
 # Zaxira: umumiy (debug uchun)
 SEARCH_BTN_ANY = "button[label='Қидириш'], button:has(.pi-search):has-text('Қидириш')"
 
-# Case A — fuqaro topilmadi (xato state-message)
+# Case A — fuqaro topilmadi (tashqi mahalla MA'LUM)
 CASE_A_MSG = "app-state-message[severity='error']"
+# Xato/ko'chirib bo'lmaydigan holatlar (yakuniy, to'ldirilmaydi)
+CASE_ERR = ("app-state-message[severity='error'], "
+            "app-state-message:has-text('кўчириб бўлмайди'), "
+            "app-state-message:has-text('мавжуд эмас')")
 TERR_ROW = "app-state-message .terr-row"
 
 # Case B — boshqa mahallada ro'yxatda (modal)
@@ -403,29 +407,31 @@ async def get_external_mahalla(page):
 
 async def classify_search(page):
     """
-    Natija aniqlash — B ga USTUVORLIK (sayt kechikishiga chidamli):
-      - Oynа davomida B modali bir marta ko'rinsa -> darhol 'B'.
-      - Forma chiqsa -> 'addable'.
-      - A (topilmadi) FAQAT oyna oxirida, B/forma umuman chiqmasagina -> 'A'.
+    Natija aniqlash (sayt kechikishi/o'zgarishiga chidamli):
+      - B modali ko'rinsa            -> 'B' (darhol).
+      - Xato (kўchirib bo'lmaydi / topilmadi / mavjud emas) -> 'error' (darhol; yakuniy).
+      - Forma chiqsa, AMMO xato/B kelmasligini kutamiz -> oyna oxirida 'addable'.
+    DIQQAT: forma birinchi chiqib, keyin xatoga o'zgarishi mumkin — shuning uchun
+    formani darrov 'addable' demaymiz, oynani kuzatib turamiz.
     """
     elapsed = 0
-    saw_a = False
+    saw_form = False
     while elapsed < UI_CHECK_MS:
         if await is_visible(page, CASE_B_DIALOG):
             return "B"
+        if await is_visible(page, CASE_ERR):
+            return "error"
         if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
-            return "addable"
-        if await is_visible(page, CASE_A_MSG):
-            saw_a = True  # ko'rindi, lekin darrov xulosa qilmaymiz (B kechikishi mumkin)
+            saw_form = True  # forma ko'rindi, lekin xato kelishi mumkin -> kutamiz
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-    # Oyna tugadi — oxirgi holatni aniqlaymiz
+    # Oyna tugadi — barqaror holatni aniqlaymiz
     if await is_visible(page, CASE_B_DIALOG):
         return "B"
+    if await is_visible(page, CASE_ERR):
+        return "error"
     if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
         return "addable"
-    if saw_a or await is_visible(page, CASE_A_MSG):
-        return "A"
     return "other"
 
 
@@ -483,7 +489,7 @@ async def main():
     if conJsh:
         log(f"Lokal kesh: {len(cache_set)} ta ЖШШИР (takrorlar o'tkaziladi)")
 
-    stats = {"A": 0, "B": 0, "addable": 0, "other": 0, "skip": 0, "err": 0}
+    stats = {"A": 0, "B": 0, "addable": 0, "cant": 0, "other": 0, "skip": 0, "err": 0}
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
@@ -550,26 +556,26 @@ async def main():
                     stats["addable"] += 1
                     outcome = "addable"
 
-                elif result == "A":
+                elif result == "error":
                     mahalla = await get_external_mahalla(page)
-                    log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND faylga yozildi.")
-                    nf_sheet.cell(row=row, column=1, value=mahalla)
-                    for c in range(1, src_maxcol + 1):
-                        nf_sheet.cell(row=row, column=c + 1, value=sheet.cell(row=row, column=c).value)
-                    safe_save(nf_wb, NOTFOUND_FILE)
-                    cell.fill = RED_FILL
-                    stats["A"] += 1
-                    outcome = "A"
+                    if mahalla:
+                        log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND faylga.")
+                        nf_sheet.cell(row=row, column=1, value=mahalla)
+                        for c in range(1, src_maxcol + 1):
+                            nf_sheet.cell(row=row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                        safe_save(nf_wb, NOTFOUND_FILE)
+                        cell.fill = RED_FILL
+                        stats["A"] += 1
+                        outcome = "A"
+                    else:
+                        log("  -> Ko'chirib bo'lmaydi / topilmadi (tashqi manzil yo'q). O'tkazildi.")
+                        stats["cant"] += 1
+                        outcome = "cant"
 
                 else:  # other -> 0 dan boshlash (bekor bosilmaydi)
                     log("  -> Boshqa holat: jarayon 0 dan boshlanadi.")
                     stats["other"] += 1
                     outcome = "other"
-                    if DEBUG_SCREENSHOTS:
-                        try:
-                            await page.screenshot(path=f"debug_row_{row}.png")
-                        except Exception:
-                            pass
 
             except Exception as e:
                 log(f"  !! XATO [{row}]: {e}")
@@ -594,6 +600,7 @@ async def main():
         log(f"A      (topilmadi -> NOTFOUND): {stats['A']}")
         log(f"B      (boshqa MFY -> ko'chdi): {stats['B']}")
         log(f"Qo'shildi (to'g'ridan forma) : {stats['addable']}")
+        log(f"Ko'chirib bo'lmadi           : {stats['cant']}")
         log(f"Boshqa (0 dan boshlandi)     : {stats['other']}")
         log(f"O'tkazib yuborilgan          : {stats['skip']}")
         log(f"Xato                         : {stats['err']}")
