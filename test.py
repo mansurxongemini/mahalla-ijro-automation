@@ -56,7 +56,7 @@ DEFAULTS = {
     "FAMILY_TYPE_LABEL": "Бошқа",
     "SERVER_WAIT_MS": 12000,
     "SETTLE_MS": 350,
-    "UI_CHECK_MS": 2000,
+    "UI_CHECK_MS": 5000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
     "SEARCH_API_HINT": "",
@@ -402,18 +402,30 @@ async def get_external_mahalla(page):
 
 
 async def classify_search(page):
-    """Server javobidan keyin: 'B' / 'A' / 'addable' (forma chiqdi) / 'other'."""
+    """
+    Natija aniqlash — B ga USTUVORLIK (sayt kechikishiga chidamli):
+      - Oynа davomida B modali bir marta ko'rinsa -> darhol 'B'.
+      - Forma chiqsa -> 'addable'.
+      - A (topilmadi) FAQAT oyna oxirida, B/forma umuman chiqmasagina -> 'A'.
+    """
     elapsed = 0
+    saw_a = False
     while elapsed < UI_CHECK_MS:
         if await is_visible(page, CASE_B_DIALOG):
             return "B"
-        if await is_visible(page, CASE_A_MSG):
-            return "A"
-        # Forma to'g'ridan chiqsa (qo'shish imkoni bor) -> addable
         if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
             return "addable"
+        if await is_visible(page, CASE_A_MSG):
+            saw_a = True  # ko'rindi, lekin darrov xulosa qilmaymiz (B kechikishi mumkin)
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
+    # Oyna tugadi — oxirgi holatni aniqlaymiz
+    if await is_visible(page, CASE_B_DIALOG):
+        return "B"
+    if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
+        return "addable"
+    if saw_a or await is_visible(page, CASE_A_MSG):
+        return "A"
     return "other"
 
 
@@ -517,7 +529,13 @@ async def main():
 
                 if result == "B":
                     log("  -> Case B: 'Давом этиш' -> forma to'ldirilmoqda.")
-                    await page.locator(CONTINUE_BTN).first.click()
+                    cont = page.locator(CONTINUE_BTN).first
+                    try:
+                        await cont.wait_for(state="visible", timeout=5000)
+                    except Exception:
+                        pass
+                    await _click_robust(page, CONTINUE_BTN, "Давом этиш")
+                    await page.wait_for_timeout(SETTLE_MS)
                     await fill_form_and_save(page)
                     log("  -> B: SAQLANDI. Excel YASHIL.")
                     cell.fill = GREEN_FILL
