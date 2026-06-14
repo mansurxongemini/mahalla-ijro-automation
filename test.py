@@ -124,7 +124,7 @@ BTN_ADD = "p-button[label='Қўшиш'] button, button:has(.pi-plus):has-text('�
 
 # 2-qadam
 JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
-SEARCH_BTN = "button:has-text('Қидириш')"
+SEARCH_BTN = "button[label='Қидириш'], button.p-button:has(.pi-search):has-text('Қидириш')"
 
 # Case A — fuqaro topilmadi (xato state-message)
 CASE_A_MSG = "app-state-message[severity='error']"
@@ -234,6 +234,23 @@ async def is_visible(page, selector):
         return False
 
 
+async def first_actionable(page, selector):
+    """Selektorga mos KO'RINADIGAN va FAOL (enabled) birinchi elementni qaytaradi."""
+    loc = page.locator(selector)
+    try:
+        n = await loc.count()
+    except Exception:
+        n = 0
+    for i in range(n):
+        b = loc.nth(i)
+        try:
+            if await b.is_visible() and await b.is_enabled():
+                return b
+        except Exception:
+            pass
+    return loc.first
+
+
 async def click_and_wait_server(page, click_selector, what):
     step(f"{what} bosilmoqda + server javobi kutilmoqda")
     def _pred(resp):
@@ -243,9 +260,14 @@ async def click_and_wait_server(page, click_selector, what):
             return resp.request.resource_type in ("xhr", "fetch")
         except Exception:
             return False
+    btn = await first_actionable(page, click_selector)
+    try:
+        await btn.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
     try:
         async with page.expect_response(_pred, timeout=SERVER_WAIT_MS) as ri:
-            await page.locator(click_selector).first.click(timeout=10000)
+            await btn.click(timeout=10000)
         resp = await ri.value
         step(f"server javobi: {resp.status} {resp.url[:80]}")
     except PWTimeout:
@@ -254,8 +276,7 @@ async def click_and_wait_server(page, click_selector, what):
 
 
 async def type_jshshir(page, jshshir):
-    """ЖШШИРni harf-harf yozadi (Angular validatsiyasi ishlashi uchun) va
-    'Қидириш' tugmasi faollashishini kutadi."""
+    """ЖШШИРni harf-harf yozadi (Angular validatsiyasi uchun) va 'Қидириш' faollashuvini kutadi."""
     inp = page.locator(JSHSHIR_INPUT).first
     await inp.click()
     await inp.fill("")
@@ -263,12 +284,11 @@ async def type_jshshir(page, jshshir):
         await inp.type(jshshir, delay=25)
     except Exception:
         await inp.fill(jshshir)
-    # validatsiya ishlashi uchun qisqa pauza + tugma faollashuvini kutamiz
     await page.wait_for_timeout(300)
-    btn = page.locator(SEARCH_BTN).first
     for _ in range(15):
+        btn = await first_actionable(page, SEARCH_BTN)
         try:
-            if await btn.is_enabled():
+            if await btn.is_visible() and await btn.is_enabled():
                 return True
         except Exception:
             pass
