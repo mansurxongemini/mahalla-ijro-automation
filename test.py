@@ -531,7 +531,7 @@ async def main():
     if conJsh:
         log(f"Lokal kesh: {len(cache_set)} ta ЖШШИР (takrorlar o'tkaziladi)")
 
-    stats = {"A": 0, "B": 0, "addable": 0, "cant": 0, "other": 0, "skip": 0, "err": 0}
+    stats = {"B": 0, "addable": 0, "notadded": 0, "member": 0, "skip": 0, "err": 0}
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
@@ -598,27 +598,24 @@ async def main():
                     stats["addable"] += 1
                     outcome = "addable"
 
-                elif result == "error":
+                elif result == "error":  # topilmadi / ko'chirib bo'lmadi -> EXCELGA yoziladi
                     mahalla = await get_external_mahalla(page)
-                    if mahalla:
-                        log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND[{nf_row}] ga.")
-                        nf_sheet.cell(row=nf_row, column=1, value=mahalla)
-                        for c in range(1, src_maxcol + 1):
-                            nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
-                        nf_row += 1
-                        safe_save(nf_wb, NOTFOUND_FILE)
-                        cell.fill = RED_FILL
-                        stats["A"] += 1
-                        outcome = "A"
-                    else:
-                        log("  -> Ko'chirib bo'lmaydi / topilmadi (tashqi manzil yo'q). O'tkazildi.")
-                        stats["cant"] += 1
-                        outcome = "cant"
+                    if not mahalla:
+                        mahalla = "None"
+                    log(f"  -> Qo'shilmadi (topilmadi/ko'chirib bo'lmadi). Mahalla: {mahalla}. NOTFOUND[{nf_row}] ga.")
+                    nf_sheet.cell(row=nf_row, column=1, value=mahalla)
+                    for c in range(1, src_maxcol + 1):
+                        nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                    nf_row += 1
+                    safe_save(nf_wb, NOTFOUND_FILE)
+                    cell.fill = RED_FILL
+                    stats["notadded"] += 1
+                    outcome = "notadded"
 
-                else:  # other -> 0 dan boshlash (bekor bosilmaydi)
-                    log("  -> Boshqa holat: jarayon 0 dan boshlanadi.")
-                    stats["other"] += 1
-                    outcome = "other"
+                else:  # other -> allaqachon shu mahallada -> EXCELGA YOZILMAYDI
+                    log("  -> Allaqachon shu mahallada (o'zgarish yo'q). Excelga yozilmaydi.")
+                    stats["member"] += 1
+                    outcome = "member"
 
             except Exception as e:
                 log(f"  !! XATO [{row}]: {e}")
@@ -640,13 +637,12 @@ async def main():
         safe_save(wb, OUTPUT_FILE)
         safe_save(nf_wb, NOTFOUND_FILE)
         log("\n==== YAKUNLANDI ====")
-        log(f"A      (topilmadi -> NOTFOUND): {stats['A']}")
-        log(f"B      (boshqa MFY -> ko'chdi): {stats['B']}")
-        log(f"Qo'shildi (to'g'ridan forma) : {stats['addable']}")
-        log(f"Ko'chirib bo'lmadi           : {stats['cant']}")
-        log(f"Boshqa (0 dan boshlandi)     : {stats['other']}")
-        log(f"O'tkazib yuborilgan          : {stats['skip']}")
-        log(f"Xato                         : {stats['err']}")
+        log(f"B        (boshqa MFY -> qo'shildi): {stats['B']}")
+        log(f"Qo'shildi (to'g'ridan forma)     : {stats['addable']}")
+        log(f"Allaqachon shu mahallada         : {stats['member']}")
+        log(f"Qo'shilmadi (-> NOTFOUND excel)  : {stats['notadded']}")
+        log(f"O'tkazib yuborilgan              : {stats['skip']}")
+        log(f"Xato                             : {stats['err']}")
         await context.close()
 
 
