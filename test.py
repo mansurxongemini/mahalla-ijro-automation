@@ -233,6 +233,18 @@ def random_phone():
     return f"{pref:02d}{rest:07d}"
 
 
+def next_empty_row(sheet):
+    """Sheetdagi birinchi bo'sh qator (ketma-ket yozish uchun)."""
+    r = sheet.max_row
+    while r >= 1:
+        maxc = sheet.max_column or 1
+        if all((sheet.cell(row=r, column=c).value in (None, "")) for c in range(1, maxc + 1)):
+            r -= 1
+        else:
+            break
+    return r + 1
+
+
 # ============================================================================
 #  UI YORDAMCHILARI
 # ============================================================================
@@ -511,8 +523,9 @@ async def main():
     else:
         nf_wb = openpyxl.Workbook()
     nf_sheet = nf_wb.active
+    nf_row = next_empty_row(nf_sheet)   # ketma-ket yozish uchun keyingi bo'sh qator
     if safe_save(nf_wb, NOTFOUND_FILE):
-        log(f"NOTFOUND fayl tayyor: {NOTFOUND_FILE}")
+        log(f"NOTFOUND fayl tayyor: {NOTFOUND_FILE} (keyingi qator: {nf_row})")
 
     cache_set = load_cache()
     if conJsh:
@@ -588,10 +601,11 @@ async def main():
                 elif result == "error":
                     mahalla = await get_external_mahalla(page)
                     if mahalla:
-                        log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND faylga.")
-                        nf_sheet.cell(row=row, column=1, value=mahalla)
+                        log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND[{nf_row}] ga.")
+                        nf_sheet.cell(row=nf_row, column=1, value=mahalla)
                         for c in range(1, src_maxcol + 1):
-                            nf_sheet.cell(row=row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                            nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                        nf_row += 1
                         safe_save(nf_wb, NOTFOUND_FILE)
                         cell.fill = RED_FILL
                         stats["A"] += 1
