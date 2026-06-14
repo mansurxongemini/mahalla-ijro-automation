@@ -1,28 +1,28 @@
 {
-    "_IZOH_": "Bu faylni Bloknotda ochib sozlamalarni o'zgartirishingiz mumkin.",
-    "_IZOH2_": "O'zgartirgandan keyin saqlang va dasturni qayta ishga tushiring.",
+    "_IZOH_": "Bu faylni Bloknotda ochib sozlamalarni o'zgartiring. So'ng dasturni qayta ishga tushiring.",
 
     "EXCEL_FILE": "1.xlsx",
     "JSHSHIR_COLUMN": 6,
     "START_ROW": 3,
     "END_ROW": null,
 
+    "NOTFOUND_FILE": "topilmadi.xlsx",
+
     "conJsh": true,
     "CACHE_FILE": "jshshir_cache.txt",
     "SKIP_PROCESSED": true,
 
-    "TARGET_URL": "https://mahalla.ijro.uz/dashboard/list/family?region_id=00s0eed0000region000008&district_id=00s0eed0000region000049&mahalla_id=66016a6ae237a52f91961c45&returnPath=%2Fdashboard%2Fassistance&page=1&limit=20&offset=0",
+    "TARGET_URL": "https://mahalla.ijro.uz/dashboard/list/population?region_id=00s0eed0000region000008&district_id=00s0eed0000region000049&mahalla_id=66016a6ae237a52f91961c45&returnPath=%2Fdashboard%2Fassistance",
 
     "HEADLESS": false,
     "SLOW_MO": 0,
 
-    "SELECT_DOC_TYPE": true,
-    "DOC_TYPE_MATCH": "ЖШШИР",
+    "PHONE_PREFIXES": [20, 33, 50, 55, 77, 78, 71, 88, 80, 90, 91, 92, 94, 93, 95, 97, 99],
     "FAMILY_TYPE_LABEL": "Бошқа",
 
     "SERVER_WAIT_MS": 12000,
-    "SETTLE_MS": 300,
-    "UI_CHECK_MS": 1500,
+    "SETTLE_MS": 350,
+    "UI_CHECK_MS": 2000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
     "SEARCH_API_HINT": "",
