@@ -124,7 +124,13 @@ BTN_ADD = "p-button[label='Қўшиш'] button, button:has(.pi-plus):has-text('�
 
 # 2-qadam
 JSHSHIR_INPUT = "xpath=//label[contains(normalize-space(.),'ЖШШИР')]/following-sibling::input[1]"
-SEARCH_BTN = "button[label='Қидириш'], button.p-button:has(.pi-search):has-text('Қидириш')"
+# Qidirish tugmasi — ЖШШИР inputi bilan BIR formada bo'lgani (sahifa filtri emas).
+# ЖШШИР label'ning eng yaqin ajdodi ichidagi "Қидириш" tugmasini topadi.
+SEARCH_BTN = ("xpath=//label[contains(normalize-space(.),'ЖШШИР')]"
+              "/ancestor::*[.//button[.//span[contains(normalize-space(.),'Қидириш')]]][1]"
+              "//button[.//span[contains(normalize-space(.),'Қидириш')]]")
+# Zaxira: umumiy (debug uchun)
+SEARCH_BTN_ANY = "button[label='Қидириш'], button:has(.pi-search):has-text('Қидириш')"
 
 # Case A — fuqaro topilmadi (xato state-message)
 CASE_A_MSG = "app-state-message[severity='error']"
@@ -251,8 +257,38 @@ async def first_actionable(page, selector):
     return loc.first
 
 
+async def _click_robust(page, selector, what):
+    """Tugmani 3 usulda bosishga urinadi: oddiy -> force -> JavaScript."""
+    btn = await first_actionable(page, selector)
+    try:
+        await btn.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
+    attempts = (
+        ("oddiy", lambda: btn.click(timeout=6000)),
+        ("force", lambda: btn.click(timeout=4000, force=True)),
+        ("js", lambda: btn.evaluate("el => el.click()")),
+    )
+    for how, fn in attempts:
+        try:
+            await fn()
+            step(f"{what}: bosildi ({how})")
+            return True
+        except Exception as e:
+            step(f"{what}: {how} click bo'lmadi: {str(e)[:70]}")
+    return False
+
+
 async def click_and_wait_server(page, click_selector, what):
     step(f"{what} bosilmoqda + server javobi kutilmoqda")
+    # Debug: nechta 'Қидириш' tugmasi bor
+    if what.startswith("Қидириш"):
+        try:
+            total = await page.locator(SEARCH_BTN_ANY).count()
+            scoped = await page.locator(click_selector).count()
+            step(f"'Қидириш' tugmalari: sahifada {total} ta, formada {scoped} ta")
+        except Exception:
+            pass
     def _pred(resp):
         try:
             if SEARCH_API_HINT:
@@ -260,16 +296,10 @@ async def click_and_wait_server(page, click_selector, what):
             return resp.request.resource_type in ("xhr", "fetch")
         except Exception:
             return False
-    btn = await first_actionable(page, click_selector)
     try:
-        await btn.scroll_into_view_if_needed(timeout=3000)
-    except Exception:
-        pass
-    try:
-        async with page.expect_response(_pred, timeout=SERVER_WAIT_MS) as ri:
-            await btn.click(timeout=10000)
-        resp = await ri.value
-        step(f"server javobi: {resp.status} {resp.url[:80]}")
+        async with page.expect_response(_pred, timeout=SERVER_WAIT_MS):
+            await _click_robust(page, click_selector, what)
+        step(f"{what}: server javobi keldi")
     except PWTimeout:
         step(f"{what}: server javobi kutilmadi (timeout)")
     await page.wait_for_timeout(SETTLE_MS)
@@ -293,7 +323,7 @@ async def type_jshshir(page, jshshir):
         except Exception:
             pass
         await page.wait_for_timeout(200)
-    step("OGOHLANTIRISH: 'Қидириш' tugmasi faollashmadi (validatsiya?)")
+    step("OGOHLANTIRISH: 'Қидириш' tugmasi faollashmadi/topilmadi")
     return False
 
 
