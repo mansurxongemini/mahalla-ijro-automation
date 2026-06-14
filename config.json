@@ -22,11 +22,11 @@
 
     "SERVER_WAIT_MS": 12000,
     "SETTLE_MS": 350,
-    "UI_CHECK_MS": 2000,
+    "UI_CHECK_MS": 5000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
     "SEARCH_API_HINT": "",
 
     "STEP_LOG": true,
-    "DEBUG_SCREENSHOTS": true
+    "DEBUG_SCREENSHOTS": false
 }
