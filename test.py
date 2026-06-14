@@ -407,26 +407,24 @@ async def get_external_mahalla(page):
 
 async def classify_search(page):
     """
-    Natija aniqlash (sayt kechikishi/o'zgarishiga chidamli):
-      - B modali ko'rinsa            -> 'B' (darhol).
-      - Xato (kўchirib bo'lmaydi / topilmadi / mavjud emas) -> 'error' (darhol; yakuniy).
-      - Forma chiqsa, AMMO xato/B kelmasligini kutamiz -> oyna oxirida 'addable'.
-    DIQQAT: forma birinchi chiqib, keyin xatoga o'zgarishi mumkin — shuning uchun
-    formani darrov 'addable' demaymiz, oynani kuzatib turamiz.
+    Natija aniqlash. MUHIM: 'Фуқаро рўйҳатга олинган маҳаллалар' dialogi
+    HAM Case B, HAM Case A (topilmadi) uchun ishlatiladi. Shuning uchun:
+      - 'Давом этиш' tugmasi BOR bo'lsa            -> 'B' (ko'chirish mumkin).
+      - Xato/topilmadi/'мавжуд эмас' xabari bo'lsa -> 'error' (yakuniy).
+      - Forma barqaror chiqsa                      -> 'addable'.
+    Forma birinchi chiqib keyin xatoga o'zgarishi mumkin — shuning uchun kuzatib turamiz.
     """
     elapsed = 0
-    saw_form = False
     while elapsed < UI_CHECK_MS:
-        if await is_visible(page, CASE_B_DIALOG):
+        if await is_visible(page, CONTINUE_BTN):
             return "B"
         if await is_visible(page, CASE_ERR):
             return "error"
-        if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
-            saw_form = True  # forma ko'rindi, lekin xato kelishi mumkin -> kutamiz
+        # forma ko'rinsa ham darrov xulosa qilmaymiz (xato kelishi mumkin)
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-    # Oyna tugadi — barqaror holatni aniqlaymiz
-    if await is_visible(page, CASE_B_DIALOG):
+    # Oyna tugadi — barqaror holat
+    if await is_visible(page, CONTINUE_BTN):
         return "B"
     if await is_visible(page, CASE_ERR):
         return "error"
