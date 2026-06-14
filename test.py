@@ -245,12 +245,36 @@ async def click_and_wait_server(page, click_selector, what):
             return False
     try:
         async with page.expect_response(_pred, timeout=SERVER_WAIT_MS) as ri:
-            await page.locator(click_selector).first.click()
+            await page.locator(click_selector).first.click(timeout=10000)
         resp = await ri.value
         step(f"server javobi: {resp.status} {resp.url[:80]}")
     except PWTimeout:
         step(f"{what}: server javobi kutilmadi (timeout)")
     await page.wait_for_timeout(SETTLE_MS)
+
+
+async def type_jshshir(page, jshshir):
+    """ЖШШИРni harf-harf yozadi (Angular validatsiyasi ishlashi uchun) va
+    'Қидириш' tugmasi faollashishini kutadi."""
+    inp = page.locator(JSHSHIR_INPUT).first
+    await inp.click()
+    await inp.fill("")
+    try:
+        await inp.type(jshshir, delay=25)
+    except Exception:
+        await inp.fill(jshshir)
+    # validatsiya ishlashi uchun qisqa pauza + tugma faollashuvini kutamiz
+    await page.wait_for_timeout(300)
+    btn = page.locator(SEARCH_BTN).first
+    for _ in range(15):
+        try:
+            if await btn.is_enabled():
+                return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(200)
+    step("OGOHLANTIRISH: 'Қидириш' tugmasi faollashmadi (validatsiya?)")
+    return False
 
 
 async def dd_pick_random(page, selector, what):
@@ -435,7 +459,7 @@ async def main():
                 await open_add(page)
 
                 step(f"ЖШШИР kiritilmoqda: {jshshir}")
-                await page.locator(JSHSHIR_INPUT).first.fill(jshshir)
+                await type_jshshir(page, jshshir)
                 await click_and_wait_server(page, SEARCH_BTN, "Қидириш")
 
                 result = await classify_search(page)
