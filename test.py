@@ -233,6 +233,18 @@ def random_phone():
     return f"{pref:02d}{rest:07d}"
 
 
+def next_empty_row(sheet):
+    """Sheetdagi birinchi bo'sh qator (ketma-ket yozish uchun)."""
+    r = sheet.max_row
+    while r >= 1:
+        maxc = sheet.max_column or 1
+        if all((sheet.cell(row=r, column=c).value in (None, "")) for c in range(1, maxc + 1)):
+            r -= 1
+        else:
+            break
+    return r + 1
+
+
 # ============================================================================
 #  UI YORDAMCHILARI
 # ============================================================================
@@ -331,18 +343,46 @@ async def type_jshshir(page, jshshir):
     return False
 
 
+async def dd_options_ready(page, selector, what, total_ms=15000):
+    """Dropdownni ochib, optionlar (serverdan) yuklanishini kutadi.
+    Bo'sh bo'lsa yopib-ochib qayta urinadi. Tayyor bo'lsa ochiq qoldiradi."""
+    waited = 0
+    while waited < total_ms:
+        if not await is_visible(page, DROPDOWN_PANEL):
+            try:
+                await page.locator(selector).first.click(timeout=4000)
+            except Exception:
+                pass
+        try:
+            await page.locator(DROPDOWN_PANEL).last.wait_for(state="visible", timeout=2000)
+        except PWTimeout:
+            await page.wait_for_timeout(500)
+            waited += 500
+            continue
+        opts = page.get_by_role("option")
+        try:
+            cnt = await opts.count()
+        except Exception:
+            cnt = 0
+        if cnt > 0:
+            return True
+        # optionlar hali yo'q -> yopib, server uchun kutib, qayta urinamiz
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await page.wait_for_timeout(700)
+        waited += 700
+    step(f"{what}: optionlar yuklanmadi ({total_ms} ms)")
+    return False
+
+
 async def dd_pick_random(page, selector, what):
-    """p-dropdown'ni ochib random variant tanlaydi."""
-    step(f"{what}: dropdown ochilmoqda")
-    await page.locator(selector).first.click()
-    await page.locator(DROPDOWN_PANEL).last.wait_for(state="visible", timeout=5000)
-    opts = page.get_by_role("option")
-    try:
-        await opts.first.wait_for(state="visible", timeout=4000)
-    except PWTimeout:
-        step(f"{what}: ro'yxat bo'sh")
-        await page.keyboard.press("Escape")
+    """p-dropdown'ni ochib (optionlar yuklanishini kutib) random variant tanlaydi."""
+    step(f"{what}: dropdown ochilmoqda (optionlar kutilmoqda)")
+    if not await dd_options_ready(page, selector, what):
         return False
+    opts = page.get_by_role("option")
     n = await opts.count()
     if n == 0:
         await page.keyboard.press("Escape")
@@ -355,14 +395,15 @@ async def dd_pick_random(page, selector, what):
         pass
     step(f"{what}: {n} ta variant, #{idx} ('{txt}') tanlanmoqda")
     await opts.nth(idx).click()
+    await page.wait_for_timeout(SETTLE_MS)  # keyingi dropdown serverdan yuklanishi uchun
     return True
 
 
 async def dd_pick_text(page, selector, label, what):
-    """p-dropdown'dan matn bo'yicha variant tanlaydi (masalan 'Бошқа')."""
-    step(f"{what}: dropdown ochilmoqda")
-    await page.locator(selector).first.click()
-    await page.locator(DROPDOWN_PANEL).last.wait_for(state="visible", timeout=5000)
+    """p-dropdown'dan (optionlar yuklanishini kutib) matn bo'yicha variant tanlaydi."""
+    step(f"{what}: dropdown ochilmoqda (optionlar kutilmoqda)")
+    if not await dd_options_ready(page, selector, what):
+        return False
     opt = page.get_by_role("option", name=label, exact=True)
     if await opt.count() == 0:
         opt = page.get_by_role("option", name=label)
@@ -476,12 +517,15 @@ async def main():
     src_maxcol = sheet.max_column
     last_row = END_ROW or sheet.max_row
 
-    # NOTFOUND fayl (Case A uchun)
+    # NOTFOUND fayl (Case A uchun) — boshidayoq yaratamiz, doim mavjud bo'lsin
     if os.path.exists(NOTFOUND_FILE):
         nf_wb = openpyxl.load_workbook(NOTFOUND_FILE)
     else:
         nf_wb = openpyxl.Workbook()
     nf_sheet = nf_wb.active
+    nf_row = next_empty_row(nf_sheet)   # ketma-ket yozish uchun keyingi bo'sh qator
+    if safe_save(nf_wb, NOTFOUND_FILE):
+        log(f"NOTFOUND fayl tayyor: {NOTFOUND_FILE} (keyingi qator: {nf_row})")
 
     cache_set = load_cache()
     if conJsh:
@@ -557,10 +601,11 @@ async def main():
                 elif result == "error":
                     mahalla = await get_external_mahalla(page)
                     if mahalla:
-                        log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND faylga.")
-                        nf_sheet.cell(row=row, column=1, value=mahalla)
+                        log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND[{nf_row}] ga.")
+                        nf_sheet.cell(row=nf_row, column=1, value=mahalla)
                         for c in range(1, src_maxcol + 1):
-                            nf_sheet.cell(row=row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                            nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                        nf_row += 1
                         safe_save(nf_wb, NOTFOUND_FILE)
                         cell.fill = RED_FILL
                         stats["A"] += 1
