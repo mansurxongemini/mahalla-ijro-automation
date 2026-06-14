@@ -141,8 +141,7 @@ FAMILY_DD = "div[formgroupname='family'] p-dropdown[formcontrolname='id']"
 MEMBER_TYPE_DD = "p-dropdown[formcontrolname='type']"
 SAVE_BTN = "button:has-text('Сақлаш')"
 
-# Bekor qilish (har qanday ko'rinadigan)
-CANCEL_BTN = "button:has-text('Бекор қилиш')"
+# Holatni 0 ga qaytarish uchun (sahifa qayta yuklanadi — Бекор tugmasi ishlatilmaydi)
 ANY_DIALOG_CLOSE = "div.p-dialog button[aria-label='Close']"
 
 DROPDOWN_PANEL = ".p-dropdown-panel"
@@ -298,30 +297,21 @@ async def dd_pick_text(page, selector, label, what):
     return True
 
 
-async def cancel_and_reset(page):
-    """Бекор қилиш / dialoglarni yopib, ro'yxatga qaytadi."""
-    step("Бекор қилиш / tozalash")
-    # 1) ko'rinadigan "Бекор қилиш"
-    try:
-        c = page.locator(CANCEL_BTN)
-        if await c.count() and await c.first.is_visible():
-            await c.first.click(timeout=1500)
-            await page.wait_for_timeout(300)
-    except Exception:
-        pass
-    # 2) qolgan dialoglarni X orqali yopamiz
-    for _ in range(3):
-        btns = page.locator(ANY_DIALOG_CLOSE)
+async def ensure_clean(page):
+    """Holatni 0 ga qaytaradi. Qo'shish formasi/dialog/xato ochiq bo'lsa sahifani
+    qayta yuklaydi (Бекор tugmasi ishlatilmaydi). Toza bo'lsa hech narsa qilmaydi."""
+    busy = (await is_visible(page, CASE_B_DIALOG)
+            or await is_visible(page, JSHSHIR_INPUT)
+            or await is_visible(page, PHONE_INPUT)
+            or await is_visible(page, CASE_A_MSG))
+    if busy:
+        step("jarayon 0 dan boshlanmoqda (sahifa qayta yuklanmoqda)")
         try:
-            if await btns.count() == 0:
-                break
-            await btns.last.click(timeout=600)
+            await page.goto(TARGET_URL)
         except Exception:
-            try:
-                await page.keyboard.press("Escape")
-            except Exception:
-                pass
-        await page.wait_for_timeout(200)
+            await page.reload()
+        await page.locator(BTN_ADD).first.wait_for(state="visible", timeout=20000)
+        await page.wait_for_timeout(300)
 
 
 async def get_external_mahalla(page):
@@ -338,13 +328,16 @@ async def get_external_mahalla(page):
 
 
 async def classify_search(page):
-    """Server javobidan keyin: 'B' / 'A' / 'other'."""
+    """Server javobidan keyin: 'B' / 'A' / 'addable' (forma chiqdi) / 'other'."""
     elapsed = 0
     while elapsed < UI_CHECK_MS:
         if await is_visible(page, CASE_B_DIALOG):
             return "B"
         if await is_visible(page, CASE_A_MSG):
             return "A"
+        # Forma to'g'ridan chiqsa (qo'shish imkoni bor) -> addable
+        if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
+            return "addable"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
     return "other"
@@ -404,7 +397,7 @@ async def main():
     if conJsh:
         log(f"Lokal kesh: {len(cache_set)} ta ЖШШИР (takrorlar o'tkaziladi)")
 
-    stats = {"A": 0, "B": 0, "other": 0, "skip": 0, "err": 0}
+    stats = {"A": 0, "B": 0, "addable": 0, "other": 0, "skip": 0, "err": 0}
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
@@ -438,7 +431,7 @@ async def main():
             log(f"[{row}] ЖШШИР: {jshshir}  ----------------------------------")
             outcome = None
             try:
-                await cancel_and_reset(page)
+                await ensure_clean(page)
                 await open_add(page)
 
                 step(f"ЖШШИР kiritilmoqda: {jshshir}")
@@ -456,12 +449,18 @@ async def main():
                     cell.fill = GREEN_FILL
                     stats["B"] += 1
                     outcome = "B"
-                    await cancel_and_reset(page)
+
+                elif result == "addable":
+                    log("  -> Qo'shish imkoni bor: forma to'ldirilmoqda.")
+                    await fill_form_and_save(page)
+                    log("  -> SAQLANDI. Excel YASHIL.")
+                    cell.fill = GREEN_FILL
+                    stats["addable"] += 1
+                    outcome = "addable"
 
                 elif result == "A":
                     mahalla = await get_external_mahalla(page)
                     log(f"  -> Case A: topilmadi. Tashqi mahalla: {mahalla!r}. NOTFOUND faylga yozildi.")
-                    # NOTFOUND: A=mahalla, B+ = asl qator
                     nf_sheet.cell(row=row, column=1, value=mahalla)
                     for c in range(1, src_maxcol + 1):
                         nf_sheet.cell(row=row, column=c + 1, value=sheet.cell(row=row, column=c).value)
@@ -469,10 +468,9 @@ async def main():
                     cell.fill = RED_FILL
                     stats["A"] += 1
                     outcome = "A"
-                    await cancel_and_reset(page)
 
-                else:
-                    log("  -> Boshqa holat: Бекор қилиш.")
+                else:  # other -> 0 dan boshlash (bekor bosilmaydi)
+                    log("  -> Boshqa holat: jarayon 0 dan boshlanadi.")
                     stats["other"] += 1
                     outcome = "other"
                     if DEBUG_SCREENSHOTS:
@@ -480,7 +478,6 @@ async def main():
                             await page.screenshot(path=f"debug_row_{row}.png")
                         except Exception:
                             pass
-                    await cancel_and_reset(page)
 
             except Exception as e:
                 log(f"  !! XATO [{row}]: {e}")
@@ -491,7 +488,6 @@ async def main():
                         await page.screenshot(path=f"debug_row_{row}.png")
                     except Exception:
                         pass
-                await cancel_and_reset(page)
 
             if outcome and outcome != "ERR":
                 cache_set.add(jshshir)
@@ -503,11 +499,12 @@ async def main():
         safe_save(wb, OUTPUT_FILE)
         safe_save(nf_wb, NOTFOUND_FILE)
         log("\n==== YAKUNLANDI ====")
-        log(f"A     (topilmadi -> NOTFOUND) : {stats['A']}")
-        log(f"B     (ko'chirildi / saqlandi): {stats['B']}")
-        log(f"Boshqa (bekor qilindi)        : {stats['other']}")
-        log(f"O'tkazib yuborilgan           : {stats['skip']}")
-        log(f"Xato                          : {stats['err']}")
+        log(f"A      (topilmadi -> NOTFOUND): {stats['A']}")
+        log(f"B      (boshqa MFY -> ko'chdi): {stats['B']}")
+        log(f"Qo'shildi (to'g'ridan forma) : {stats['addable']}")
+        log(f"Boshqa (0 dan boshlandi)     : {stats['other']}")
+        log(f"O'tkazib yuborilgan          : {stats['skip']}")
+        log(f"Xato                         : {stats['err']}")
         await context.close()
 
 
