@@ -454,20 +454,15 @@ async def dd_pick_text(page, selector, label, what):
 
 
 async def ensure_clean(page):
-    """Holatni 0 ga qaytaradi. Qo'shish formasi/dialog/xato ochiq bo'lsa sahifani
-    qayta yuklaydi (Бекор tugmasi ishlatilmaydi). Toza bo'lsa hech narsa qilmaydi."""
-    busy = (await is_visible(page, CASE_B_DIALOG)
-            or await is_visible(page, JSHSHIR_INPUT)
-            or await is_visible(page, PHONE_INPUT)
-            or await is_visible(page, CASE_A_MSG))
-    if busy:
-        step("jarayon 0 dan boshlanmoqda (sahifa qayta yuklanmoqda)")
+    """Holatni 0 ga qaytaradi: ESC 4 marta bosib barcha ochiq oynalarni yopadi."""
+    step("jarayon 0 ga qaytarilmoqda (ESC x4)")
+    for _ in range(4):
         try:
-            await page.goto(TARGET_URL)
+            await page.keyboard.press("Escape")
         except Exception:
-            await page.reload()
-        await page.locator(BTN_ADD).first.wait_for(state="visible", timeout=20000)
-        await page.wait_for_timeout(300)
+            pass
+        await page.wait_for_timeout(150)
+    await page.wait_for_timeout(200)
 
 
 async def get_external_mahalla(page):
