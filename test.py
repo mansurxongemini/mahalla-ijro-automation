@@ -138,6 +138,10 @@ CASE_A_MSG = "app-state-message[severity='error']"
 CASE_ERR = ("app-state-message[severity='error'], "
             "app-state-message:has-text('кўчириб бўлмайди'), "
             "app-state-message:has-text('мавжуд эмас')")
+
+# Toast bildirishnoma (o'ng yuqorida chiqqan xato/ogohlantirish)
+TOAST_ERR = ".p-toast-message-error, .p-toast-message-warn"
+TOAST_DETAIL = ".p-toast-detail"
 TERR_ROW = "app-state-message .terr-row"
 
 # Case B — boshqa mahallada ro'yxatda (modal)
@@ -224,6 +228,39 @@ def already_processed(cell):
     except Exception:
         return False
     return any(c in color for c in ("FFC7CE", "C6EFCE"))
+
+
+def diagnose_file(path):
+    """Fayl haqiqiy .xlsx emasligini sababini taxmin qiladi."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except Exception as e:
+        return f"fayl o'qilmadi ({e})"
+    if head[:2] == b"PK":
+        return "ZIP/XLSX boshlanishi to'g'ri, lekin ichi buzuq (to'liq saqlanmagan bo'lishi mumkin)"
+    if head[:4] == b"\xd0\xcf\x11\xe0":
+        return "eski .XLS format (Excel 97-2003) — uni .xlsx ga aylantiring"
+    if head[:1] == b"<":
+        return "HTML/XML fayl (.xlsx emas)"
+    if not head:
+        return "fayl bo'sh (0 bayt)"
+    return f"noma'lum format, boshlang'ich baytlar: {head!r}"
+
+
+def load_excel_or_explain(path):
+    """Excelni yuklaydi; bo'lmasa tushunarli sabab chiqarib None qaytaradi."""
+    if not os.path.exists(path):
+        log(f"!! '{path}' fayli topilmadi. config.json dagi EXCEL_FILE ni tekshiring.")
+        return None
+    try:
+        return openpyxl.load_workbook(path)
+    except Exception as e:
+        log(f"!! '{path}' faylini ochib bo'lmadi: {e}")
+        log(f"   Taxminiy sabab: {diagnose_file(path)}")
+        log("   YECHIM: faylni Excelda oching -> Файл -> Сақлаш (Save As) ->")
+        log("           'Excel Workbook (*.xlsx)' formatini tanlab qayta saqlang.")
+        return None
 
 
 def random_phone():
@@ -448,12 +485,11 @@ async def get_external_mahalla(page):
 
 async def classify_search(page):
     """
-    Natija aniqlash. MUHIM: 'Фуқаро рўйҳатга олинган маҳаллалар' dialogi
-    HAM Case B, HAM Case A (topilmadi) uchun ishlatiladi. Shuning uchun:
+    Natija aniqlash:
       - 'Давом этиш' tugmasi BOR bo'lsa            -> 'B' (ko'chirish mumkin).
-      - Xato/topilmadi/'мавжуд эмас' xabari bo'lsa -> 'error' (yakuniy).
+      - Xato xabari (ekranda YOKI toast) bo'lsa    -> 'error' (excelga yoziladi).
       - Forma barqaror chiqsa                      -> 'addable'.
-    Forma birinchi chiqib keyin xatoga o'zgarishi mumkin — shuning uchun kuzatib turamiz.
+      - Hech narsa (allaqachon a'zo)               -> 'other' (excelga yozilmaydi).
     """
     elapsed = 0
     while elapsed < UI_CHECK_MS:
@@ -461,13 +497,16 @@ async def classify_search(page):
             return "B"
         if await is_visible(page, CASE_ERR):
             return "error"
-        # forma ko'rinsa ham darrov xulosa qilmaymiz (xato kelishi mumkin)
+        if await is_visible(page, TOAST_ERR):
+            return "error"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
     # Oyna tugadi — barqaror holat
     if await is_visible(page, CONTINUE_BTN):
         return "B"
     if await is_visible(page, CASE_ERR):
+        return "error"
+    if await is_visible(page, TOAST_ERR):
         return "error"
     if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
         return "addable"
@@ -512,7 +551,9 @@ async def fill_form_and_save(page):
 async def main():
     load_path = OUTPUT_FILE if os.path.exists(OUTPUT_FILE) else EXCEL_FILE
     log(f"Yuklanmoqda: {load_path}  ->  natija: {OUTPUT_FILE}")
-    wb = openpyxl.load_workbook(load_path)
+    wb = load_excel_or_explain(load_path)
+    if wb is None:
+        return
     sheet = wb.active
     src_maxcol = sheet.max_column
     last_row = END_ROW or sheet.max_row
@@ -600,9 +641,17 @@ async def main():
 
                 elif result == "error":  # topilmadi / ko'chirib bo'lmadi -> EXCELGA yoziladi
                     mahalla = await get_external_mahalla(page)
+                    # toast matni ham tekshiriladi (tashqi mahalla yo'q bo'lsa)
                     if not mahalla:
+                        try:
+                            td = page.locator(TOAST_DETAIL)
+                            if await td.count() > 0 and await td.last.is_visible():
+                                toast_txt = (await td.last.inner_text()).strip()
+                                step(f"toast matni: {toast_txt!r}")
+                        except Exception:
+                            pass
                         mahalla = "None"
-                    log(f"  -> Qo'shilmadi (topilmadi/ko'chirib bo'lmadi). Mahalla: {mahalla}. NOTFOUND[{nf_row}] ga.")
+                    log(f"  -> Qo'shilmadi. Mahalla: {mahalla}. NOTFOUND[{nf_row}] ga.")
                     nf_sheet.cell(row=nf_row, column=1, value=mahalla)
                     for c in range(1, src_maxcol + 1):
                         nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
