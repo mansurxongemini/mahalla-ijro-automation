@@ -143,6 +143,7 @@ CASE_ERR = ("app-state-message[severity='error'], "
 
 # Toast bildirishnoma (o'ng yuqorida chiqqan xato/ogohlantirish)
 TOAST_ERR = ".p-toast-message-error, .p-toast-message-warn"
+TOAST_ANY = ".p-toast-message"
 TOAST_DETAIL = ".p-toast-detail"
 TERR_ROW = "app-state-message .terr-row"
 
@@ -481,15 +482,21 @@ async def get_external_mahalla(page):
 
 
 async def click_search_and_wait(page):
-    """Қидириш bosib, natijani kutadi. 'other' (allaqachon a'zo) deb xulosa
-    FAQAT kamida MIN_RESULT_MS o'tib, tarmoq tinch va ekran bo'sh bo'lgandagina chiqadi.
-    So'nggi XHR'lar logga yoziladi (qidiruv API'sini aniqlash uchun)."""
+    """Қидириш bosib, natijani kutadi.
+    - Indikator (B / xato / toast / forma) ko'rinsa -> darhol.
+    - 'other' FAQAT: server javobi (API so'rovi) kelgan + tarmoq tinch + ekran bo'sh + MIN o'tgan.
+    - Agar API so'rovi umuman ko'rinmasa -> SERVER_WAIT_MS gacha kutadi (xato qilmaslik uchun).
+    - Barcha API so'rovlar logga yoziladi (qidiruv API'sini aniqlash uchun)."""
     captured = []
 
     def on_resp(r):
         try:
-            if r.request.resource_type in ("xhr", "fetch"):
-                captured.append(f"{r.status} {r.url}")
+            u = r.url
+            low = u.lower().split("?")[0]
+            if any(low.endswith(e) for e in (".js", ".css", ".png", ".jpg", ".jpeg",
+                                             ".svg", ".woff", ".woff2", ".ico", ".gif", ".map")):
+                return
+            captured.append(f"{r.request.resource_type} {r.status} {u}")
         except Exception:
             pass
 
@@ -503,7 +510,13 @@ async def click_search_and_wait(page):
             return "B"
         if await is_visible(page, CASE_ERR):
             return "error"
-        if await is_visible(page, TOAST_ERR):
+        if await is_visible(page, TOAST_ANY):
+            try:
+                t = page.locator(TOAST_DETAIL)
+                if await t.count() > 0:
+                    step(f"toast: {(await t.last.inner_text()).strip()!r}")
+            except Exception:
+                pass
             return "error"
         if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
             return "addable"
@@ -516,16 +529,16 @@ async def click_search_and_wait(page):
         if r:
             result = r
             break
-        # 'other' xulosasini faqat MIN_RESULT_MS o'tgach va tarmoq tinch bo'lsa qilamiz
-        if elapsed >= MIN_RESULT_MS:
+        # 'other' xulosasi: server javobi kelgan bo'lsa, MIN o'tgan bo'lsa, tarmoq tinch bo'lsa
+        if captured and elapsed >= MIN_RESULT_MS:
             try:
-                await page.wait_for_load_state("networkidle", timeout=400)
+                await page.wait_for_load_state("networkidle", timeout=500)
                 await page.wait_for_timeout(SETTLE_MS)
                 r = await check()
                 result = r if r else "other"
                 break
             except PWTimeout:
-                pass  # tarmoq hali band -> kutamiz
+                pass
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
 
@@ -533,7 +546,7 @@ async def click_search_and_wait(page):
     if result is None:
         result = "other"
     if result == "other":
-        step(f"-> other. So'nggi XHR: {captured[-4:] if captured else 'yo`q'}")
+        step(f"-> other. API so'rovlar: {captured[-6:] if captured else 'YO`Q (qidiruv server`ga bormadi?)'}")
     return result
 
 
