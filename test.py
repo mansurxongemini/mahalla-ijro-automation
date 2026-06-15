@@ -226,6 +226,39 @@ def already_processed(cell):
     return any(c in color for c in ("FFC7CE", "C6EFCE"))
 
 
+def diagnose_file(path):
+    """Fayl haqiqiy .xlsx emasligini sababini taxmin qiladi."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except Exception as e:
+        return f"fayl o'qilmadi ({e})"
+    if head[:2] == b"PK":
+        return "ZIP/XLSX boshlanishi to'g'ri, lekin ichi buzuq (to'liq saqlanmagan bo'lishi mumkin)"
+    if head[:4] == b"\xd0\xcf\x11\xe0":
+        return "eski .XLS format (Excel 97-2003) — uni .xlsx ga aylantiring"
+    if head[:1] == b"<":
+        return "HTML/XML fayl (.xlsx emas)"
+    if not head:
+        return "fayl bo'sh (0 bayt)"
+    return f"noma'lum format, boshlang'ich baytlar: {head!r}"
+
+
+def load_excel_or_explain(path):
+    """Excelni yuklaydi; bo'lmasa tushunarli sabab chiqarib None qaytaradi."""
+    if not os.path.exists(path):
+        log(f"!! '{path}' fayli topilmadi. config.json dagi EXCEL_FILE ni tekshiring.")
+        return None
+    try:
+        return openpyxl.load_workbook(path)
+    except Exception as e:
+        log(f"!! '{path}' faylini ochib bo'lmadi: {e}")
+        log(f"   Taxminiy sabab: {diagnose_file(path)}")
+        log("   YECHIM: faylni Excelda oching -> Файл -> Сақлаш (Save As) ->")
+        log("           'Excel Workbook (*.xlsx)' formatini tanlab qayta saqlang.")
+        return None
+
+
 def random_phone():
     """Ruxsat etilgan prefiksli 9 xonali raqam (prefiks 2 + 7 random)."""
     pref = random.choice(PHONE_PREFIXES)
@@ -512,7 +545,9 @@ async def fill_form_and_save(page):
 async def main():
     load_path = OUTPUT_FILE if os.path.exists(OUTPUT_FILE) else EXCEL_FILE
     log(f"Yuklanmoqda: {load_path}  ->  natija: {OUTPUT_FILE}")
-    wb = openpyxl.load_workbook(load_path)
+    wb = load_excel_or_explain(load_path)
+    if wb is None:
+        return
     sheet = wb.active
     src_maxcol = sheet.max_column
     last_row = END_ROW or sheet.max_row
