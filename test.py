@@ -60,7 +60,7 @@ DEFAULTS = {
     "MIN_RESULT_MS": 3000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
-    "SEARCH_API_HINT": "",
+    "SEARCH_API_HINT": "get-citizen-short-info",
     "STEP_LOG": True,
     "DEBUG_SCREENSHOTS": False,
 }
@@ -481,33 +481,61 @@ async def get_external_mahalla(page):
     return ""
 
 
+async def dismiss_toasts(page):
+    """Ko'rinib turgan toast bildirishnomalarni yopadi (eski natijani aralashtirmaslik uchun)."""
+    try:
+        closers = page.locator(".p-toast-icon-close")
+        for i in range(await closers.count()):
+            try:
+                await closers.nth(i).click(timeout=400)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def click_search_and_wait(page):
-    """Қидириш bosib, natijani kutadi.
-    - Indikator (B / xato / toast / forma) ko'rinsa -> darhol.
-    - 'other' FAQAT: server javobi (API so'rovi) kelgan + tarmoq tinch + ekran bo'sh + MIN o'tgan.
-    - Agar API so'rovi umuman ko'rinmasa -> SERVER_WAIT_MS gacha kutadi (xato qilmaslik uchun).
-    - Barcha API so'rovlar logga yoziladi (qidiruv API'sini aniqlash uchun)."""
-    captured = []
+    """Қидириш bosib, QIDIRUV API javobini kutadi, so'ng natijani aniqlaydi:
+      'B' / 'addable' / 'toast' (fuqaro topilmadi sariq toast) / 'error' (dialog xato) /
+      'server_error' (5xx) / 'other' (allaqachon a'zo)."""
+    await dismiss_toasts(page)  # eski toastlarni yopamiz
 
-    def on_resp(r):
+    def pred(r):
         try:
-            u = r.url
-            low = u.lower().split("?")[0]
-            if any(low.endswith(e) for e in (".js", ".css", ".png", ".jpg", ".jpeg",
-                                             ".svg", ".woff", ".woff2", ".ico", ".gif", ".map")):
-                return
-            captured.append(f"{r.request.resource_type} {r.status} {u}")
+            if SEARCH_API_HINT:
+                return SEARCH_API_HINT in r.url
+            return r.request.resource_type in ("xhr", "fetch")
         except Exception:
-            pass
+            return False
 
-    page.on("response", on_resp)
-    step("Қидириш bosilmoqda")
-    await _click_robust(page, SEARCH_BTN, "Қидириш")
-    step("natija kutilmoqda...")
+    status = None
+    for attempt in range(3):
+        status = None
+        step("Қидириш bosilmoqda + qidiruv javobi kutilmoqda")
+        try:
+            async with page.expect_response(pred, timeout=SERVER_WAIT_MS) as ri:
+                await _click_robust(page, SEARCH_BTN, "Қидириш")
+            resp = await ri.value
+            status = resp.status
+            step(f"qidiruv javobi: {status}")
+        except PWTimeout:
+            step("qidiruv javobi kelmadi (timeout)")
+        if status and status >= 500:
+            step(f"server xato {status} — qayta urinish ({attempt + 1}/3)")
+            await page.wait_for_timeout(1000)
+            continue
+        break
+
+    if status and status >= 500:
+        return "server_error"
+
+    await page.wait_for_timeout(SETTLE_MS)  # render uchun
 
     async def check():
         if await is_visible(page, CONTINUE_BTN):
             return "B"
+        if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
+            return "addable"
         if await is_visible(page, CASE_ERR):
             return "error"
         if await is_visible(page, TOAST_ANY):
@@ -517,37 +545,17 @@ async def click_search_and_wait(page):
                     step(f"toast: {(await t.last.inner_text()).strip()!r}")
             except Exception:
                 pass
-            return "error"
-        if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
-            return "addable"
+            return "toast"
         return None
 
-    result = None
     elapsed = 0
-    while elapsed < SERVER_WAIT_MS:
+    while elapsed < UI_CHECK_MS:
         r = await check()
         if r:
-            result = r
-            break
-        # 'other' xulosasi: server javobi kelgan bo'lsa, MIN o'tgan bo'lsa, tarmoq tinch bo'lsa
-        if captured and elapsed >= MIN_RESULT_MS:
-            try:
-                await page.wait_for_load_state("networkidle", timeout=500)
-                await page.wait_for_timeout(SETTLE_MS)
-                r = await check()
-                result = r if r else "other"
-                break
-            except PWTimeout:
-                pass
+            return r
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-
-    page.remove_listener("response", on_resp)
-    if result is None:
-        result = "other"
-    if result == "other":
-        step(f"-> other. API so'rovlar: {captured[-6:] if captured else 'YO`Q (qidiruv server`ga bormadi?)'}")
-    return result
+    return "other"
 
 
 async def open_add(page):
@@ -621,6 +629,8 @@ async def main():
             input, ">>> Login qiling va kerakli sahifani oching, keyin ENTER bosing... "
         )
 
+        modal_open_logged = False
+        reuse_modal = False
         for row in range(START_ROW, last_row + 1):
             cell = sheet.cell(row=row, column=JSHSHIR_COLUMN)
             raw = cell.value
@@ -643,8 +653,13 @@ async def main():
             log(f"[{row}] ЖШШИР: {jshshir}  ----------------------------------")
             outcome = None
             try:
-                await ensure_clean(page)
-                await open_add(page)
+                # Modal toast holatidan keyin ochiq qolgan bo'lsa — qayta ochmaymiz
+                if reuse_modal and await is_visible(page, JSHSHIR_INPUT):
+                    step("modal ochiq (oldingi toastdan) — qayta ochilmaydi, faqat yangi ЖШШИР")
+                else:
+                    await ensure_clean(page)
+                    await open_add(page)
+                reuse_modal = False
 
                 step(f"ЖШШИР kiritilmoqda: {jshshir}")
                 await type_jshshir(page, jshshir)
@@ -674,17 +689,21 @@ async def main():
                     stats["addable"] += 1
                     outcome = "addable"
 
-                elif result == "error":  # topilmadi / ko'chirib bo'lmadi -> EXCELGA yoziladi
+                elif result == "toast":  # fuqaro topilmadi (sariq toast) -> EXCELGA, modal ochiq qoladi
+                    log(f"  -> Topilmadi (toast). NOTFOUND[{nf_row}]. Modal ochiq qoladi (0 dan boshlanmaydi).")
+                    nf_sheet.cell(row=nf_row, column=1, value="None")
+                    for c in range(1, src_maxcol + 1):
+                        nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
+                    nf_row += 1
+                    safe_save(nf_wb, NOTFOUND_FILE)
+                    cell.fill = RED_FILL
+                    stats["notadded"] += 1
+                    outcome = "notadded"
+                    reuse_modal = True  # keyingi ЖШШИР shu ochiq modalda qidiriladi
+
+                elif result == "error":  # dialogdagi xato / ko'chirib bo'lmadi -> EXCELGA + reset
                     mahalla = await get_external_mahalla(page)
-                    # toast matni ham tekshiriladi (tashqi mahalla yo'q bo'lsa)
                     if not mahalla:
-                        try:
-                            td = page.locator(TOAST_DETAIL)
-                            if await td.count() > 0 and await td.last.is_visible():
-                                toast_txt = (await td.last.inner_text()).strip()
-                                step(f"toast matni: {toast_txt!r}")
-                        except Exception:
-                            pass
                         mahalla = "None"
                     log(f"  -> Qo'shilmadi. Mahalla: {mahalla}. NOTFOUND[{nf_row}] ga.")
                     nf_sheet.cell(row=nf_row, column=1, value=mahalla)
@@ -695,6 +714,11 @@ async def main():
                     cell.fill = RED_FILL
                     stats["notadded"] += 1
                     outcome = "notadded"
+
+                elif result == "server_error":  # 5xx — qayta urinish uchun keshlanmaydi
+                    log("  -> Server xato (5xx). O'tkazildi (keyingi run'da qayta urinadi).")
+                    stats["err"] += 1
+                    outcome = "ERR"
 
                 else:  # other -> allaqachon shu mahallada -> EXCELGA YOZILMAYDI
                     log("  -> Allaqachon shu mahallada (o'zgarish yo'q). Excelga yozilmaydi.")
