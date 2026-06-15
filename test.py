@@ -57,6 +57,7 @@ DEFAULTS = {
     "SERVER_WAIT_MS": 12000,
     "SETTLE_MS": 350,
     "UI_CHECK_MS": 5000,
+    "MIN_RESULT_MS": 3000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
     "SEARCH_API_HINT": "",
@@ -105,6 +106,7 @@ FAMILY_TYPE_LABEL = CFG["FAMILY_TYPE_LABEL"]
 SERVER_WAIT_MS = CFG["SERVER_WAIT_MS"]
 SETTLE_MS = CFG["SETTLE_MS"]
 UI_CHECK_MS = CFG["UI_CHECK_MS"]
+MIN_RESULT_MS = CFG.get("MIN_RESULT_MS", 3000)
 SAVE_EVERY = CFG["SAVE_EVERY"]
 POLL_MS = CFG["POLL_MS"]
 SEARCH_API_HINT = CFG["SEARCH_API_HINT"]
@@ -479,13 +481,22 @@ async def get_external_mahalla(page):
 
 
 async def click_search_and_wait(page):
-    """Қидириш bosib, natijani INSON KABI kutadi:
-    indikator ko'rinsa darhol qaytaradi; aks holda TARMOQ TINCHLANISHINI (networkidle) kutadi.
-    'other' (allaqachon a'zo) FAQAT tarmoq tinch + ekran bo'sh bo'lgandagina belgilanadi.
-    """
+    """Қидириш bosib, natijani kutadi. 'other' (allaqachon a'zo) deb xulosa
+    FAQAT kamida MIN_RESULT_MS o'tib, tarmoq tinch va ekran bo'sh bo'lgandagina chiqadi.
+    So'nggi XHR'lar logga yoziladi (qidiruv API'sini aniqlash uchun)."""
+    captured = []
+
+    def on_resp(r):
+        try:
+            if r.request.resource_type in ("xhr", "fetch"):
+                captured.append(f"{r.status} {r.url}")
+        except Exception:
+            pass
+
+    page.on("response", on_resp)
     step("Қидириш bosilmoqda")
     await _click_robust(page, SEARCH_BTN, "Қидириш")
-    step("natija kutilmoqda (ekran + tarmoq)")
+    step("natija kutilmoqda...")
 
     async def check():
         if await is_visible(page, CONTINUE_BTN):
@@ -498,27 +509,32 @@ async def click_search_and_wait(page):
             return "addable"
         return None
 
+    result = None
     elapsed = 0
     while elapsed < SERVER_WAIT_MS:
         r = await check()
         if r:
-            return r
-        # Qidiruv tugadimi? (tarmoq tinchlandimi)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=600)
-            await page.wait_for_timeout(SETTLE_MS)  # render uchun
-            r = await check()
-            if r:
-                return r
-            step("tarmoq tinch + ekran bo'sh -> 'other' (allaqachon a'zo)")
-            return "other"
-        except PWTimeout:
-            pass  # tarmoq hali band -> kutamiz
+            result = r
+            break
+        # 'other' xulosasini faqat MIN_RESULT_MS o'tgach va tarmoq tinch bo'lsa qilamiz
+        if elapsed >= MIN_RESULT_MS:
+            try:
+                await page.wait_for_load_state("networkidle", timeout=400)
+                await page.wait_for_timeout(SETTLE_MS)
+                r = await check()
+                result = r if r else "other"
+                break
+            except PWTimeout:
+                pass  # tarmoq hali band -> kutamiz
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
 
-    step("kutish vaqti tugadi -> 'other'")
-    return "other"
+    page.remove_listener("response", on_resp)
+    if result is None:
+        result = "other"
+    if result == "other":
+        step(f"-> other. So'nggi XHR: {captured[-4:] if captured else 'yo`q'}")
+    return result
 
 
 async def open_add(page):
