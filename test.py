@@ -138,6 +138,10 @@ CASE_A_MSG = "app-state-message[severity='error']"
 CASE_ERR = ("app-state-message[severity='error'], "
             "app-state-message:has-text('кўчириб бўлмайди'), "
             "app-state-message:has-text('мавжуд эмас')")
+
+# Toast bildirishnoma (o'ng yuqorida chiqqan xato/ogohlantirish)
+TOAST_ERR = ".p-toast-message-error, .p-toast-message-warn"
+TOAST_DETAIL = ".p-toast-detail"
 TERR_ROW = "app-state-message .terr-row"
 
 # Case B — boshqa mahallada ro'yxatda (modal)
@@ -481,12 +485,11 @@ async def get_external_mahalla(page):
 
 async def classify_search(page):
     """
-    Natija aniqlash. MUHIM: 'Фуқаро рўйҳатга олинган маҳаллалар' dialogi
-    HAM Case B, HAM Case A (topilmadi) uchun ishlatiladi. Shuning uchun:
+    Natija aniqlash:
       - 'Давом этиш' tugmasi BOR bo'lsa            -> 'B' (ko'chirish mumkin).
-      - Xato/topilmadi/'мавжуд эмас' xabari bo'lsa -> 'error' (yakuniy).
+      - Xato xabari (ekranda YOKI toast) bo'lsa    -> 'error' (excelga yoziladi).
       - Forma barqaror chiqsa                      -> 'addable'.
-    Forma birinchi chiqib keyin xatoga o'zgarishi mumkin — shuning uchun kuzatib turamiz.
+      - Hech narsa (allaqachon a'zo)               -> 'other' (excelga yozilmaydi).
     """
     elapsed = 0
     while elapsed < UI_CHECK_MS:
@@ -494,13 +497,16 @@ async def classify_search(page):
             return "B"
         if await is_visible(page, CASE_ERR):
             return "error"
-        # forma ko'rinsa ham darrov xulosa qilmaymiz (xato kelishi mumkin)
+        if await is_visible(page, TOAST_ERR):
+            return "error"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
     # Oyna tugadi — barqaror holat
     if await is_visible(page, CONTINUE_BTN):
         return "B"
     if await is_visible(page, CASE_ERR):
+        return "error"
+    if await is_visible(page, TOAST_ERR):
         return "error"
     if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
         return "addable"
@@ -635,9 +641,17 @@ async def main():
 
                 elif result == "error":  # topilmadi / ko'chirib bo'lmadi -> EXCELGA yoziladi
                     mahalla = await get_external_mahalla(page)
+                    # toast matni ham tekshiriladi (tashqi mahalla yo'q bo'lsa)
                     if not mahalla:
+                        try:
+                            td = page.locator(TOAST_DETAIL)
+                            if await td.count() > 0 and await td.last.is_visible():
+                                toast_txt = (await td.last.inner_text()).strip()
+                                step(f"toast matni: {toast_txt!r}")
+                        except Exception:
+                            pass
                         mahalla = "None"
-                    log(f"  -> Qo'shilmadi (topilmadi/ko'chirib bo'lmadi). Mahalla: {mahalla}. NOTFOUND[{nf_row}] ga.")
+                    log(f"  -> Qo'shilmadi. Mahalla: {mahalla}. NOTFOUND[{nf_row}] ga.")
                     nf_sheet.cell(row=nf_row, column=1, value=mahalla)
                     for c in range(1, src_maxcol + 1):
                         nf_sheet.cell(row=nf_row, column=c + 1, value=sheet.cell(row=row, column=c).value)
