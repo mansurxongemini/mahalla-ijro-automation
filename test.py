@@ -478,18 +478,16 @@ async def get_external_mahalla(page):
     return ""
 
 
-async def classify_search(page):
+async def click_search_and_wait(page):
+    """Қидириш bosib, natijani INSON KABI kutadi:
+    indikator ko'rinsa darhol qaytaradi; aks holda TARMOQ TINCHLANISHINI (networkidle) kutadi.
+    'other' (allaqachon a'zo) FAQAT tarmoq tinch + ekran bo'sh bo'lgandagina belgilanadi.
     """
-    Natija aniqlash — INSON KABI: ekranda biron o'zgarish ko'ringuncha kutadi.
-    Hech narsa ko'rinmasa "other" deb DARROV XULOSA QILMAYDI — ikki marta kutadi.
-      - 'Давом этиш' tugmasi BOR bo'lsa            -> 'B'.
-      - Xato xabari (ekranda YOKI toast) bo'lsa    -> 'error' (excelga yoziladi).
-      - Forma barqaror chiqsa                      -> 'addable'.
-      - To'liq vaqt (2x) o'tdi, HECH NARSA ko'rinmadi -> 'other' (allaqachon a'zo).
-    """
-    total_wait = UI_CHECK_MS * 2  # ikki marta kutamiz (server kechikishiga chidamli)
-    elapsed = 0
-    while elapsed < total_wait:
+    step("Қидириш bosilmoqda")
+    await _click_robust(page, SEARCH_BTN, "Қидириш")
+    step("natija kutilmoqda (ekran + tarmoq)")
+
+    async def check():
         if await is_visible(page, CONTINUE_BTN):
             return "B"
         if await is_visible(page, CASE_ERR):
@@ -498,12 +496,28 @@ async def classify_search(page):
             return "error"
         if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
             return "addable"
+        return None
+
+    elapsed = 0
+    while elapsed < SERVER_WAIT_MS:
+        r = await check()
+        if r:
+            return r
+        # Qidiruv tugadimi? (tarmoq tinchlandimi)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=600)
+            await page.wait_for_timeout(SETTLE_MS)  # render uchun
+            r = await check()
+            if r:
+                return r
+            step("tarmoq tinch + ekran bo'sh -> 'other' (allaqachon a'zo)")
+            return "other"
+        except PWTimeout:
+            pass  # tarmoq hali band -> kutamiz
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-        if elapsed == UI_CHECK_MS:
-            step("natija hali ko'rinmadi — qo'shimcha kutilmoqda...")
-    # Haqiqatan ham hech narsa — allaqachon a'zo
-    step("to'liq kutish tugadi — 'other' (allaqachon a'zo)")
+
+    step("kutish vaqti tugadi -> 'other'")
     return "other"
 
 
@@ -605,9 +619,7 @@ async def main():
 
                 step(f"ЖШШИР kiritilmoqda: {jshshir}")
                 await type_jshshir(page, jshshir)
-                await click_and_wait_server(page, SEARCH_BTN, "Қидириш")
-
-                result = await classify_search(page)
+                result = await click_search_and_wait(page)
                 step(f"natija = {result}")
 
                 if result == "B":
