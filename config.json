@@ -23,6 +23,7 @@
     "SERVER_WAIT_MS": 12000,
     "SETTLE_MS": 350,
     "UI_CHECK_MS": 5000,
+    "MIN_RESULT_MS": 3000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
     "SEARCH_API_HINT": "",
