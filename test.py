@@ -480,31 +480,30 @@ async def get_external_mahalla(page):
 
 async def classify_search(page):
     """
-    Natija aniqlash:
-      - 'Давом этиш' tugmasi BOR bo'lsa            -> 'B' (ko'chirish mumkin).
+    Natija aniqlash — INSON KABI: ekranda biron o'zgarish ko'ringuncha kutadi.
+    Hech narsa ko'rinmasa "other" deb DARROV XULOSA QILMAYDI — ikki marta kutadi.
+      - 'Давом этиш' tugmasi BOR bo'lsa            -> 'B'.
       - Xato xabari (ekranda YOKI toast) bo'lsa    -> 'error' (excelga yoziladi).
       - Forma barqaror chiqsa                      -> 'addable'.
-      - Hech narsa (allaqachon a'zo)               -> 'other' (excelga yozilmaydi).
+      - To'liq vaqt (2x) o'tdi, HECH NARSA ko'rinmadi -> 'other' (allaqachon a'zo).
     """
+    total_wait = UI_CHECK_MS * 2  # ikki marta kutamiz (server kechikishiga chidamli)
     elapsed = 0
-    while elapsed < UI_CHECK_MS:
+    while elapsed < total_wait:
         if await is_visible(page, CONTINUE_BTN):
             return "B"
         if await is_visible(page, CASE_ERR):
             return "error"
         if await is_visible(page, TOAST_ERR):
             return "error"
+        if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
+            return "addable"
         await page.wait_for_timeout(POLL_MS)
         elapsed += POLL_MS
-    # Oyna tugadi — barqaror holat
-    if await is_visible(page, CONTINUE_BTN):
-        return "B"
-    if await is_visible(page, CASE_ERR):
-        return "error"
-    if await is_visible(page, TOAST_ERR):
-        return "error"
-    if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
-        return "addable"
+        if elapsed == UI_CHECK_MS:
+            step("natija hali ko'rinmadi — qo'shimcha kutilmoqda...")
+    # Haqiqatan ham hech narsa — allaqachon a'zo
+    step("to'liq kutish tugadi — 'other' (allaqachon a'zo)")
     return "other"
 
 
