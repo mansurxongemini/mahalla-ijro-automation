@@ -58,6 +58,7 @@ DEFAULTS = {
     "SETTLE_MS": 350,
     "UI_CHECK_MS": 5000,
     "MIN_RESULT_MS": 3000,
+    "STABLE_MS": 1200,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
     "SEARCH_API_HINT": "get-citizen-short-info",
@@ -107,6 +108,7 @@ SERVER_WAIT_MS = CFG["SERVER_WAIT_MS"]
 SETTLE_MS = CFG["SETTLE_MS"]
 UI_CHECK_MS = CFG["UI_CHECK_MS"]
 MIN_RESULT_MS = CFG.get("MIN_RESULT_MS", 3000)
+STABLE_MS = CFG.get("STABLE_MS", 1200)
 SAVE_EVERY = CFG["SAVE_EVERY"]
 POLL_MS = CFG["POLL_MS"]
 SEARCH_API_HINT = CFG["SEARCH_API_HINT"]
@@ -145,6 +147,11 @@ CASE_ERR = ("app-state-message[severity='error'], "
 TOAST_ERR = ".p-toast-message-error, .p-toast-message-warn"
 TOAST_ANY = ".p-toast-message"
 TOAST_DETAIL = ".p-toast-detail"
+
+# "Yuklanmoqda" belgilari (spinner / progress) — odam shuni ko'rib kutadi
+SPINNER = (".p-button-loading-icon, .p-button-loading, .pi-spin, .pi-spinner, "
+           ".p-progress-spinner, p-progressspinner, .p-datatable-loading-overlay, "
+           "mat-spinner, mat-progress-bar, .mdc-linear-progress, .cdk-overlay-backdrop")
 TERR_ROW = "app-state-message .terr-row"
 
 # Case B — boshqa mahallada ro'yxatda (modal)
@@ -494,68 +501,108 @@ async def dismiss_toasts(page):
         pass
 
 
-async def click_search_and_wait(page):
-    """Қидириш bosib, QIDIRUV API javobini kutadi, so'ng natijani aniqlaydi:
-      'B' / 'addable' / 'toast' (fuqaro topilmadi sariq toast) / 'error' (dialog xato) /
-      'server_error' (5xx) / 'other' (allaqachon a'zo)."""
-    await dismiss_toasts(page)  # eski toastlarni yopamiz
-
-    def pred(r):
-        try:
-            if SEARCH_API_HINT:
-                return SEARCH_API_HINT in r.url
-            return r.request.resource_type in ("xhr", "fetch")
-        except Exception:
-            return False
-
-    status = None
-    for attempt in range(3):
-        status = None
-        step("Қидириш bosilmoqda + qidiruv javobi kutilmoqda")
-        try:
-            async with page.expect_response(pred, timeout=SERVER_WAIT_MS) as ri:
-                await _click_robust(page, SEARCH_BTN, "Қидириш")
-            resp = await ri.value
-            status = resp.status
-            step(f"qidiruv javobi: {status}")
-        except PWTimeout:
-            step("qidiruv javobi kelmadi (timeout)")
-        if status and status >= 500:
-            step(f"server xato {status} — qayta urinish ({attempt + 1}/3)")
-            await page.wait_for_timeout(1000)
-            continue
-        break
-
-    if status and status >= 500:
-        return "server_error"
-
-    await page.wait_for_timeout(SETTLE_MS)  # render uchun
-
-    async def check():
-        if await is_visible(page, CONTINUE_BTN):
-            return "B"
-        if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
-            return "addable"
-        if await is_visible(page, CASE_ERR):
-            return "error"
-        if await is_visible(page, TOAST_ANY):
+async def any_visible(page, selector, cap=8):
+    """Selektorga mos elementlardan BIRORTASI ko'rinsa True (first emas, hammasi)."""
+    try:
+        loc = page.locator(selector)
+        n = min(await loc.count(), cap)
+        for i in range(n):
             try:
-                t = page.locator(TOAST_DETAIL)
-                if await t.count() > 0:
-                    step(f"toast: {(await t.last.inner_text()).strip()!r}")
+                if await loc.nth(i).is_visible():
+                    return True
             except Exception:
                 pass
-            return "toast"
-        return None
+    except Exception:
+        pass
+    return False
 
-    elapsed = 0
-    while elapsed < UI_CHECK_MS:
-        r = await check()
-        if r:
-            return r
-        await page.wait_for_timeout(POLL_MS)
-        elapsed += POLL_MS
-    return "other"
+
+async def result_signature(page):
+    """Ekrandagi natija sohasining 'imzosi' (element sonlari). O'zgarsa — ekran o'zgardi."""
+    parts = []
+    for sel in ("app-citizen-family-info-dialog", "app-state-message",
+                ".p-toast-message", PHONE_INPUT, HOUSE_DD):
+        try:
+            parts.append(str(await page.locator(sel).count()))
+        except Exception:
+            parts.append("?")
+    return ",".join(parts)
+
+
+async def click_search_and_wait(page):
+    """INSON KABI, faqat ekranga qarab natijani aniqlaydi:
+       - Ko'ringan holat (B / forma / xato / toast) -> darhol harakat.
+       - Aks holda: 'yuklanmoqda' (spinner) yoki qidiruv so'rovi tugamaguncha KUTADI,
+         so'ng ekran BARQARORLASHGUNCHA kutadi; shundan keyin hech narsa yo'q bo'lsa -> 'other'.
+       - 5xx server xato -> 'server_error' (qayta urinish uchun)."""
+    await dismiss_toasts(page)
+
+    pending = {"n": 0}
+    last_status = {"code": None}
+
+    def on_req(r):
+        try:
+            if SEARCH_API_HINT and SEARCH_API_HINT in r.url:
+                pending["n"] += 1
+        except Exception:
+            pass
+
+    def on_res(r):
+        try:
+            if SEARCH_API_HINT and SEARCH_API_HINT in r.url:
+                pending["n"] = max(0, pending["n"] - 1)
+                last_status["code"] = r.status
+        except Exception:
+            pass
+
+    page.on("request", on_req)
+    page.on("response", on_res)
+    try:
+        step("Қидириш bosilmoqda")
+        await _click_robust(page, SEARCH_BTN, "Қидириш")
+        step("natija kutilmoqda (ekran kuzatilmoqda)...")
+
+        elapsed = 0
+        last_sig = None
+        stable_since = 0
+        while elapsed < SERVER_WAIT_MS:
+            # 1) Ko'ringan aniq holatlar -> darhol
+            if await is_visible(page, CONTINUE_BTN):
+                return "B"
+            if await is_visible(page, PHONE_INPUT) or await is_visible(page, HOUSE_DD):
+                return "addable"
+            if await is_visible(page, CASE_ERR):
+                return "error"
+            if await any_visible(page, TOAST_ANY):
+                try:
+                    t = page.locator(TOAST_DETAIL)
+                    if await t.count() > 0:
+                        step(f"toast: {(await t.last.inner_text()).strip()!r}")
+                except Exception:
+                    pass
+                return "toast"
+
+            # 2) Hali ish ketyaptimi? (spinner ko'rinadi yoki qidiruv so'rovi tugamagan)
+            working = pending["n"] > 0 or await any_visible(page, SPINNER)
+            sig = await result_signature(page)
+            if working or sig != last_sig:
+                last_sig = sig
+                stable_since = elapsed   # o'zgardi/ishlayapti -> kutishda davom
+            else:
+                # 3) Ish tugadi va ekran barqaror — yetarli kutib, hech narsa yo'q bo'lsa
+                if elapsed >= MIN_RESULT_MS and (elapsed - stable_since) >= STABLE_MS:
+                    if last_status["code"] and last_status["code"] >= 500:
+                        return "server_error"
+                    return "other"
+            await page.wait_for_timeout(POLL_MS)
+            elapsed += POLL_MS
+
+        if last_status["code"] and last_status["code"] >= 500:
+            return "server_error"
+        return "other"
+    finally:
+        page.remove_listener("request", on_req)
+        page.remove_listener("response", on_res)
 
 
 async def open_add(page):
