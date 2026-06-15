@@ -26,7 +26,7 @@
     "MIN_RESULT_MS": 3000,
     "SAVE_EVERY": 1,
     "POLL_MS": 200,
-    "SEARCH_API_HINT": "",
+    "SEARCH_API_HINT": "get-citizen-short-info",
 
     "STEP_LOG": true,
     "DEBUG_SCREENSHOTS": false
